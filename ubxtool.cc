@@ -586,7 +586,7 @@ int main(int argc, char** argv)
   unsigned int fuzzPositionMeters=0;
   string owner;
   string remark;
-  int dynamicModel=2;
+  int dynamicModel=-1;
 
   app.add_option("--destination,-d", destinations, "Send output to this IPv4/v6 address");
   app.add_flag("--wait", doWait, "Wait a bit, do not try to read init messages");
@@ -607,7 +607,7 @@ int main(int argc, char** argv)
   app.add_option("--fuzz-position,-f", fuzzPositionMeters, "Fuzz position by this many meters");
   app.add_option("--owner,-o", owner, "Name/handle/nick of owner/operator");
   app.add_option("--remark", remark, "Remark for this station");
-  app.add_option("--dynamic-model,-m", dynamicModel, "Dynamic platform model (stationary=2)");
+  app.add_option("--dynamic-model,-m", dynamicModel, "Dynamic platform model");
   
   int surveyMinSeconds = 0;
   int surveyMinCM = 0;
@@ -932,52 +932,56 @@ int main(int argc, char** argv)
         }
       }
       
-      /* Check dynamic model ID */
-      if(dynamicModel != 0 /* Portable */
-        && dynamicModel != 2 /* Stationary */
-        && dynamicModel != 3 /* Pedestrian */
-        && dynamicModel != 4 /* Automotive */
-        && dynamicModel != 5 /* Sea */
-        && dynamicModel != 6 /* Airborne <1g */
-        && dynamicModel != 7 /* Airborne <2g */
-        && dynamicModel != 8 /* Airborne <4g */
-        && dynamicModel != 9 /* Wrist Watch */
-        && dynamicModel != 10 /* Bike */ )
+      if(dynamicModel != -1)
       {
-        cerr<<humanTimeNow()<<" Dynamic Model id is not valid, defaulting to 2 - stationary"<<endl;
-        dynamicModel = 2;
-      }
+        /* Check dynamic model ID */
+        if(dynamicModel != 0 /* Portable */
+          && dynamicModel != 2 /* Stationary */
+          && dynamicModel != 3 /* Pedestrian */
+          && dynamicModel != 4 /* Automotive */
+          && dynamicModel != 5 /* Sea */
+          && dynamicModel != 6 /* Airborne <1g */
+          && dynamicModel != 7 /* Airborne <2g */
+          && dynamicModel != 8 /* Airborne <4g */
+          && dynamicModel != 9 /* Wrist Watch */
+          && dynamicModel != 10 /* Bike */ )
+        {
+          cerr<<humanTimeNow()<<" Dynamic Model id is not valid, not configuring."<<endl;
+        }
+        else
+        {
+          cerr<<humanTimeNow()<<" Setting Dynamic Model"<<endl;
 
-      if (doDEBUG) { cerr<<humanTimeNow()<<" Setting Dynamic Model"<<endl; }
+          /* UBX-CFG-NAV5 */
+          msg = buildUbxMessage(0x06, 0x24, {
+            0x01, 0x00, /* Bitmask of settings to apply: bit 0 = dynamic model only */
+            (unsigned char)((dynamicModel) & 0xFF), /* Dynamic Model */
+            0x00, /* Fix Type */
+            0x00, 0x00, 0x00, 0x00, /* 2D Altitude Value */
+            0x00, 0x00, 0x00, 0x00, /* 2D Altitude Variance */
+            0x00, /* Minimum GNSS Satellite Elevation */
+            0x00, /* Reserved */
+            0x00, 0x00, /* Position DOP Mask */
+            0x00, 0x00, /* Time DOP Mask */
+            0x00, 0x00, /* Position Accuracy Mask */
+            0x00, 0x00, /* Time Accuracy Mask */
+            0x00, /* Static hold threshold */
+            0x00, /* DGNSS Timeout */
+            0x00, /* Min Satellites for Fix */
+            0x00, /* Min C/N0 Threshold for Satellites */
+            0x00, 0x00, /* Reserved */
+            0x00, 0x00, /* Static Hold Distance Threshold */
+            0x00, /* UTC Standard (Automatic) */
+            0x00, 0x00, 0x00, 0x00, 0x00, /* Reserved */
+          });
 
-      /* UBX-CFG-NAV5 */
-      msg = buildUbxMessage(0x06, 0x24, {
-        0x01, 0x00, /* Bitmask of settings to apply: bit 0 = dynamic model only */
-        (unsigned char)((dynamicModel) & 0xFF), /* Dynamic Model */
-        0x00, /* Fix Type */
-        0x00, 0x00, 0x00, 0x00, /* 2D Altitude Value */
-        0x00, 0x00, 0x00, 0x00, /* 2D Altitude Variance */
-        0x00, /* Minimum GNSS Satellite Elevation */
-        0x00, /* Reserved */
-        0x00, 0x00, /* Position DOP Mask */
-        0x00, 0x00, /* Time DOP Mask */
-        0x00, 0x00, /* Position Accuracy Mask */
-        0x00, 0x00, /* Time Accuracy Mask */
-        0x00, /* Static hold threshold */
-        0x00, /* DGNSS Timeout */
-        0x00, /* Min Satellites for Fix */
-        0x00, /* Min C/N0 Threshold for Satellites */
-        0x00, 0x00, /* Reserved */
-        0x00, 0x00, /* Static Hold Distance Threshold */
-        0x00, /* UTC Standard (Automatic) */
-        0x00, 0x00, 0x00, 0x00, 0x00, /* Reserved */
-      });
-
-      if(sendAndWaitForUBXAckNack(fd, 10, msg, 0x06, 0x24)) {
-        if (doDEBUG) { cerr<<humanTimeNow()<<" Set Dynamic Model successfully"<<endl; }
-      }
-      else {
-        if (doDEBUG) { cerr<<humanTimeNow()<<" GOT NACK setting Dynamic Model"<<endl; }
+          if(sendAndWaitForUBXAckNack(fd, 10, msg, 0x06, 0x24)) {
+            if (doDEBUG) { cerr<<humanTimeNow()<<" Set Dynamic Model successfully"<<endl; }
+          }
+          else {
+            cerr<<humanTimeNow()<<" Got NACK setting Dynamic Model"<<endl;
+          }
+        }
       }
        
       if(!doKeepNMEA) {
