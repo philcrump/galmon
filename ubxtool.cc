@@ -658,6 +658,7 @@ int main(int argc, char** argv)
   if(doFakeFix) // hack
     version9 = true;
   bool m8t = false;
+  bool m9 = false;
 
   string hwversion;
   string swversion;
@@ -724,7 +725,13 @@ int main(int argc, char** argv)
         cerr<<humanTimeNow()<<" Detected timing module"<<endl;
         m8t=true;
       }
-      if (doDEBUG && m8t) { cerr<<humanTimeNow()<<" Detected timing module"<<endl; }
+
+      if(mods.find("M9") != string::npos) {
+        /* M9 doesn't support RXM-RAWX */
+        cerr<<humanTimeNow()<<" Detected U-Blox M9"<<endl;
+        m9=true;
+      }
+
       if (doDEBUG) { cerr<<humanTimeNow()<<" Sending serial number query"<<endl; }
       msg = buildUbxMessage(0x27, 0x03, {});
       um1=sendAndWaitForUBX(fd, 1, msg, 0x27, 0x03); // ask for serial
@@ -986,8 +993,10 @@ int main(int argc, char** argv)
         enableUBXMessageOnPort(fd, 0x0d, 0x04, ubxport, 2);       
       }
 
-      if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-RXM-RAWX"<<endl; } // RF doppler
-      enableUBXMessageOnPort(fd, 0x02, 0x15, ubxport, 8); // RXM-RAWX
+      if(!m9) {
+        if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-RXM-RAWX"<<endl; } // RF doppler
+        enableUBXMessageOnPort(fd, 0x02, 0x15, ubxport, 8); // RXM-RAWX
+      }
 
       if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-NAV-CLOCK"<<endl; } // clock details
       enableUBXMessageOnPort(fd, 0x01, 0x22, ubxport, 16); // UBX-NAV-CLOCK
