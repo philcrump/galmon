@@ -1810,7 +1810,12 @@ int main(int argc, char** argv)
         TS.res3[0] = TS.res3[1] = 0;
         if(memcmp(&TS, &lastTS, sizeof(TS))) {
           cerr<<humanTimeNow()<<" TIM-SVIN valid "<< (int)TS.valid<<" active " << (int)TS.active<<" duration "<<TS.dur<<"s meanAcc " <<sqrt(TS.meanVar)/10<< "cm obs "<<TS.obs<<" ";
-          cerr<<std::fixed<<"("<<TS.meanXCM <<", "<<TS.meanYCM <<", "<<TS.meanZCM<<")"<<endl;
+          cerr<<std::fixed<<"("<<TS.meanXCM <<", "<<TS.meanYCM <<", "<<TS.meanZCM<<")";
+
+          auto latlonh = ecefToWGS84Deg(TS.meanXCM/100.0, 
+                                        TS.meanYCM/100.0, 
+                                        TS.meanZCM/100.0);
+          cerr<<" lat "<< get<0>(latlonh)<<" lon "<< get<1>(latlonh) << " h " << get<2>(latlonh) << endl;
         }
         lastTS = TS;
       }
