@@ -34,7 +34,9 @@
 
 #include "CLI/CLI.hpp"
 #include "gpscnav.hh"
+#include "rtcm.hh"
 #include "version.hh"
+
 
 static char program[]="navparse";
 
@@ -1243,6 +1245,19 @@ try
           //          item["t0c"] = s.second.liveIOD().getT0c();
           
 
+          if(s.second.rtcmEphDelta.id.gnss == s.first.gnss && s.second.rtcmEphDelta.id.sv == s.first.sv && s.second.rtcmEphDelta.iod == s.second.liveIOD().getIOD()
+             && abs(s.second.rtcmEphDelta.sow - s.second.tow())<60) {
+            const auto& ed = s.second.rtcmEphDelta;
+            item["rtcm-eph-delta-cm"] = truncPrec(sqrt(ed.radial*ed.radial + ed.along*ed.along + ed.cross*ed.cross)/10.0, 2);
+            item["rtcm-eph-radial-cm"] = truncPrec(ed.radial/10.0, 2);
+            item["rtcm-eph-along-cm"] = truncPrec(ed.along/10.0, 2);
+            item["rtcm-eph-cross-cm"] = truncPrec(ed.cross/10.0, 2);
+            item["rtcm-eph-dradial-cm"] = truncPrec(ed.dradial/10.0, 2);
+            item["rtcm-eph-dalong-cm"] = truncPrec(ed.dalong/10.0, 2);
+            item["rtcm-eph-dcross-cm"] = truncPrec(ed.dcross/10.0, 2);
+            
+          }
+          
           Point p;
           Point core;
           
@@ -2159,6 +2174,51 @@ try
       //      if(g_svstats[id].wn < 512) // XXX ROLLOVER
       //        g_svstats[id].wn += 2048;
     }
+    else if(nmm.type() == NavMonMessage::RTCMMessageType) {
+      RTCMMessage rm;
+      rm.parse(nmm.rm().contents());
+      if(rm.type == 1057 || rm.type == 1240) {
+        for(const auto& ed : rm.d_ephs) {
+          auto iter = g_svstats.find(ed.id);
+          if(iter != g_svstats.end() && iter->second.completeIOD()  && iter->second.liveIOD().getIOD() == ed.iod)
+            iter->second.rtcmEphDelta = ed;
+          
+          idb.addValue(ed.id, "rtcm-eph-correction", {
+                       {"iod", ed.iod},
+                       {"radial", ed.radial},
+                       {"along", ed.along},
+                       {"cross", ed.cross},
+                       {"dradial", ed.dradial},
+                       {"dalong", ed.dalong},
+                       {"dcross", ed.dcross},
+                         {"ssr-iod", rm.ssrIOD},
+                       {"ssr-provider", rm.ssrProvider},
+                       {"ssr-solution", rm.ssrSolution},
+                       {"tow", rm.sow},
+                         {"udi", rm.udi}},
+            nmm.localutcseconds(),
+            nmm.sourceid());
+
+        }
+      }
+      else if(rm.type == 1058 || rm.type == 1241) {
+        for(const auto& cd : rm.d_clocks) {
+          idb.addValue(cd.id, "rtcm-clock-correction", {
+                       {"dclock0", cd.dclock0},
+                         {"dclock1", cd.dclock1},
+                           {"dclock2", cd.dclock2},
+                         {"ssr-iod", rm.ssrIOD},
+                       {"ssr-provider", rm.ssrProvider},
+                       {"ssr-solution", rm.ssrSolution},
+                       {"tow", rm.sow},
+                         {"udi", rm.udi}},
+            nmm.localutcseconds(),
+            nmm.sourceid());
+          
+        }
+      }
+
+    }
     else if(nmm.type()== NavMonMessage::GPSCnavType) {
       SatID id{nmm.gpsc().gnssid(), nmm.gpsc().gnsssv(), nmm.gpsc().sigid()};
       g_svstats[id].perrecv[nmm.sourceid()].t = nmm.localutcseconds();
@@ -2285,7 +2345,7 @@ try
       int strno = gm.parse(std::basic_string<uint8_t>((uint8_t*)nmm.gloi().contents().c_str(), nmm.gloi().contents().size()));
       g_svstats[id].perrecv[nmm.sourceid()].t = nmm.localutcseconds();
       if(strno == 1 && gm.n4 != 0 && gm.NT !=0) {
-        uint32_t glotime = gm.getGloTime(); // this starts GLONASS time at 31st of december 1995, 00:00 UTC
+        //        uint32_t glotime = gm.getGloTime(); // this starts GLONASS time at 31st of december 1995, 00:00 UTC
         // CONVERSION, possibly vital
         //        svstat.wn = glotime / (7*86400);
         //        svstat.tow = glotime % (7*86400);
@@ -2359,6 +2419,36 @@ try
                 
       }
       for(const auto& lt : delta.second) {
+        auto iter = g_svstats.find(lt.id);
+        if(iter == g_svstats.end())
+          continue;
+        const auto& s = *iter;
+        bool haveEphemeris=false;
+        double spaceShift=0, ephShift = 0, rangeShift =0;
+        if(s.second.completeIOD() && (s.second.liveIOD().getIOD() & 0xff) == lt.iod8) {
+            Point sat;
+            
+            s.second.getCoordinates(s.second.tow(), &sat);
+            Point adjsat=sat;
+            adjsat.x += lt.dx;
+            adjsat.y += lt.dy;
+            adjsat.z += lt.dz;
+            Point sbasCenter;
+            int prn = nmm.sbm().gnsssv();
+            if(prn== 126 || prn == 136 || prn == 123)
+              sbasCenter = c_egnosCenter;
+            else if(prn == 138 || prn == 131 || prn == 133)
+              sbasCenter = c_waasCenter;
+            else
+              sbasCenter = Point{0,0,0};
+            
+            double dist = Vector(sbasCenter, adjsat).length() - Vector(sbasCenter, sat).length();
+            spaceShift = dist;
+            dist -= lt.dai / 3;
+            ephShift = dist;
+            rangeShift = dist - g_svstats[lt.id].sbas[nmm.sbm().gnsssv()].fast.correction;
+            haveEphemeris=true;
+          }
         idb.addValue(lt.id,"sbas_lterm",
                      {
                        {"iod8", lt.iod8},
@@ -2371,7 +2461,11 @@ try
                                    {"ddx", lt.ddx},
                                      {"ddy", lt.ddy},
                                        {"ddz", lt.ddz},
-                                         {"ddai", lt.ddai}
+                                         {"ddai", lt.ddai},
+                                           {"ephemeris", 1.0*haveEphemeris},
+                                             {"space_shift", spaceShift},
+                                               {"eph_shift", ephShift},
+                                                 {"range_shift", rangeShift}
                      }, nmm.localutcseconds(), nmm.sbm().gnsssv(), "sbas");
 
       }
