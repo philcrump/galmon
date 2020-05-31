@@ -609,20 +609,21 @@ int main(int argc, char** argv)
       }
       if(!version9) {
         //                                  ver   RO   maxch cfgs
-        msg = buildUbxMessage(0x06, 0x3e, {0x00, 0x00, 0xff, 0x06,
-              //                            GPS   min  max   res   x1         x2    x3,   x4
-              0x00, 0x04, 0x08, 0,  doGPS,    0x00, 0x01, 0x00,
-              //                            SBAS  min  max   rex   x1       x2    x3    x4
-              0x01, 0x03, 0x04, 0,   doSBAS,  0x00, 0x01, 0x00,
-              //                            BEI   min  max   res   x1       x2    x3,   x4
-              0x03, 0x04, 0x08, 0,  doBeidou, 0x00, 0x01, 0x00,
-              //                            ???   min  max   res   x1   x2    x3,   x4
-              0x05, 0x04, 0x08, 0,  0, 0x00, 0x01, 0x00,
-            
-              //                            GAL   min  max   res   x1   x2    x3,   x4
-              0x02, 0x08, 0x0A, 0,  doGalileo, 0x00, 0x01, 0x00,
-              //                            GLO   min  max   res   x1   x2    x3,   x4
-              0x06, 0x06, 0x08, 0,  doGlonass, 0x00, 0x01, 0x00
+        msg = buildUbxMessage(0x06, 0x3e, {0x00, 0x00, 0xff, 0x07,
+              // GPS   min  max   res   x1         x2    x3,   x4
+              0x00, 0x0A, 0x10, 0,  doGPS,     0x00, 0x01, 0x01,
+              // SBAS  min  max   rex   x1       x2    x3    x4
+              0x01, 0x03, 0x04, 0,  doSBAS,    0x00, 0x01, 0x01,
+              // GAL   min  max   res   x1   x2    x3,   x4
+              0x02, 0x08, 0x0A, 0,  doGalileo, 0x00, 0x01, 0x01,
+              // BEI   min  max   res   x1       x2    x3,   x4
+              0x03, 0x0A, 0x10, 0,  doBeidou,  0x00, 0x01, 0x01,
+              // IMES  min  max   res   x1       x2    x3,   x4
+              0x04, 0x00, 0x00, 0,  0,         0x00, 0x01, 0x03,
+              // QZSS  min  max   res   x1   x2    x3,   x4
+              0x05, 0x00, 0x00, 0,  0,         0x00, 0x01, 0x05,
+              // GLO   min  max   res   x1   x2    x3,   x4
+              0x06, 0x00, 0x00, 0,  doGlonass, 0x00, 0x01, 0x01,
 
               });
       
@@ -770,6 +771,27 @@ int main(int argc, char** argv)
         else {
           cerr<<humanTimeNow()<<" Got nack on SBAS setting"<<endl;
           exit(-1);
+        }
+      }
+
+   if(!version9) {
+        /* ublox M8 only */
+        if (doDEBUG) { cerr<<humanTimeNow()<<" Setting power mode to Full Power"<<endl; }
+
+        /* UBX-CFG-PMS, available in fw v3.01 */
+        msg = buildUbxMessage(0x06, 0x86, {
+          0x00, /* Message version = 0x00 */
+          0x00, /* Power Mode = 'Full Power' = 0x00 */
+          0x00, 0x00, /* Position update period, only valid in 'Interval' power mode, else 0 */
+          0x00, 0x00, /* Duration of ON, only valid in 'Interval' power mode, else 0 */
+          0x00, 0x00 /* Reserved */
+        });
+
+        if(sendAndWaitForUBXAckNack(fd, 10, msg, 0x06, 0x86)) {
+          if (doDEBUG) { cerr<<humanTimeNow()<<" Set power mode to Full Power successfully"<<endl; }
+        }
+        else {
+          if (doDEBUG) { cerr<<humanTimeNow()<<" GOT NACK setting power mode to Full Power"<<endl; }
         }
       }
 
