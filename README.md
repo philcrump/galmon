@@ -100,21 +100,21 @@ Running in Docker
 -----------------
 
 We publish official Docker images for galmon on
-[docker hub](https://hub.docker.com/r/faucet/faucet) for multiple architectures.
+[docker hub](https://hub.docker.com/r/berthubert/galmon) for multiple architectures.
 
 To run a container with a shell in there (this will also expose a port so you
 can view the UI too and assumes a ublox GPS device too -
 you may need to tweak as necessary):
 
 ```
-docker run -it --rm --device=/dev/ttyACM0 -p 10000:10000 galmon/galmon
+docker run -it --rm --device=/dev/ttyACM0 -p 10000:10000 berthubert/galmon
 ```
 
 Running a daemonized docker container reporting data to a remote server
 might look like:
 
 ```
-docker run -d --restart=always --device=/dev/ttyACM0 --name=galmon galmon/galmon /galmon/ubxtool --wait --port /dev/ttyACM0 --gps --galileo --glonass --destination [server] --station [station-id] --owner [owner]
+docker run -d --restart=always --device=/dev/ttyACM0 --name=galmon berthubert/galmon ubxtool --wait --port /dev/ttyACM0 --gps --galileo --glonass --destination [server] --station [station-id] --owner [owner]
 ```
 
 To make your docker container update automatically you could use a tool such as
@@ -334,7 +334,7 @@ To get SP3 GBM from GFZ Potsdam for GPS week number 2111:
 ```
 WN=2111
 lftp -c "mget ftp://ftp.gfz-potsdam.de/GNSS/products/mgnss/${WN}/gbm*sp3.Z"
-gunzip gbm*sp3
+gunzip gbm*sp3.Z
 ```
 
 To feed data, use: 
