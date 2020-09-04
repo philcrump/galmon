@@ -1846,7 +1846,7 @@ int main(int argc, char** argv)
         NS.res3[0] = NS.res3[1] = 0;
         NS.iTow = 0;
         if(memcmp(&NS, &lastNS, sizeof(NS))) {
-          cerr<<humanTimeNow()<<" NAV-SVIN ver "<<(int)NS.ver<< " valid "<< (int)NS.valid<<" active " << (int)NS.active<<" duration "<<NS.dur<<"s meanAcc " <<NS.meanAcc /100<< "cm obs "<<NS.obs<<" ";
+          cerr<<humanTimeNow()<<" NAV-SVIN ver "<<(int)NS.ver<< " valid "<< (int)NS.valid<<" active " << (int)NS.active<<" duration "<<NS.dur<<"s meanAcc " <<NS.meanAcc /10<< "mm obs "<<NS.obs<<" ";
           cerr<<std::fixed<<" ("<<NS.meanXCM + 0.01*NS.meanXHP<<", "<<NS.meanYCM  + 0.01*NS.meanYHP<<", "<<NS.meanZCM  + 0.01*NS.meanZHP<<")";
           
           auto latlonh = ecefToWGS84Deg((NS.meanXCM +0.01*NS.meanXHP)/100.0, 
