@@ -85,7 +85,6 @@ function componentDidMount() {
         .text(function(d) { return d + "°"; });
 
         sats.select('g.satellites').remove();
-    console.log(gnss_position);
     
         let points = sats
             .insert("g")
@@ -259,7 +258,6 @@ function update()
       
 }
 
-console.log(window.location.href);
 var url = new URL(window.location.href);
 observer = url.searchParams.get("observer");
 

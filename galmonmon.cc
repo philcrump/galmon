@@ -45,7 +45,6 @@ public:
   std::optional<string> reportState(string_view thing, string_view name, var_t state, const std::string& state_text="");
   std::optional<string> getState(string_view thing, string_view name);
 
-
   std::optional<string> getPrevState(string_view thing, string_view name);  
 
   struct State
@@ -166,23 +165,7 @@ std::optional<string> StateKeeper::reportState(string_view thing, string_view na
 
 
 StateKeeper g_sk;
-#if 0
-static std::string string_replace(const std::string& str, const std::string& match, 
-        const std::string& replacement, unsigned int max_replacements = UINT_MAX)
-{
-    size_t pos = 0;
-    std::string newstr = str;
-    unsigned int replacements = 0;
-    while ((pos = newstr.find(match, pos)) != std::string::npos
-            && replacements < max_replacements)
-    {
-         newstr.replace(pos, match.length(), replacement);
-         pos += replacement.length();
-         replacements++;
-    }
-    return newstr;
-}
-#endif 
+
 void sendTweet(const string& tweet)
 {
   string etweet = tweet;
@@ -197,8 +180,8 @@ int main(int argc, char **argv)
 {
   MiniCurl mc;
   MiniCurl::MiniCurlHeaders mch;
-  //  string url="https://galmon.eu/svs.json";
-  string url="http://[::1]:29599/";
+  string url="https://galmon.eu/";
+  //  string url="http://[::1]:29599/";
   bool doVERSION{false};
 
   CLI::App app(program);
@@ -222,6 +205,7 @@ int main(int argc, char **argv)
   g_sk.setBoolNames("health", "healthy", "unhealthy");
   g_sk.setBoolNames("eph-too-old", "ephemeris fresh", "ephemeris aged");
   g_sk.setBoolNames("silent", "observed", "not observed");
+  g_sk.setBoolNames("osnma", "OFF", "ON");
 
   std::variant<bool, string> tst;
 
@@ -308,6 +292,18 @@ int main(int argc, char **argv)
           
         }
 
+	static int ctr;
+	bool overriden=false;
+	/*
+	if(fullName=="E01@1") {
+	  if(((ctr++) % 130) < 65)
+	    if(sv.count("osnma"))
+	      overriden = true;
+	  cerr<<"Reporting for "<<fullName<<": "<<(overriden || (sv.count("osnma") && (sv["osnma"] != false)))<<endl;
+	}
+	*/
+	auto osnmachange = g_sk.reportState(fullName, "osnma", overriden || (sv.count("osnma") && (sv["osnma"] != false)));
+	
         auto healthchange = g_sk.reportState(fullName, "health", sv["healthissue"]!=0);
         std::optional<string> tooOldChange;
         if(gnssid == 2)
@@ -347,6 +343,8 @@ int main(int argc, char **argv)
         */
         ostringstream out;
 
+	if(osnmachange)
+	  out<<"OSNMA state change: "<< (*osnmachange) <<" ";
           
         if(healthchange)
           out<< *healthchange<<" ";

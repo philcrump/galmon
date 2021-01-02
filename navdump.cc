@@ -392,6 +392,10 @@ try
       static map<int,GalileoMessage> oldEph;
       cout << "gal inav wtype "<<wtype<<" for "<<nmm.gi().gnssid()<<","<<nmm.gi().gnsssv()<<","<<nmm.gi().sigid()<<" pbwn "<<nmm.gi().gnsswn()<<" pbtow "<< nmm.gi().gnsstow();
       static uint32_t tow;
+      if(wtype >=1 && wtype <= 5) {
+        if(nmm.gi().has_reserved1())
+          cout<<" res1 "<<makeHexDump(nmm.gi().reserved1());
+      }
       if(wtype == 4) {
         //              2^-34       2^-46
         cout <<" iodnav "<<gm.iodnav <<" af0 "<<gm.af0 <<" af1 "<<gm.af1 <<", scaled: "<<ldexp(1.0*gm.af0, 19-34)<<", "<<ldexp(1.0*gm.af1, 38-46);
@@ -535,10 +539,51 @@ try
         if(gm.alma3.e1bhs != 0) {
           cout <<" gm.tow "<<gm.tow<<" gmwtypes.tow "<< gmwtypes[{sv,9}].tow <<" ";
         }
-        cout<<"  "<<gmwtypes[{sv,9}].alma3.svid <<" af0 "<<gm.alma3.af0<<" af1 "<< gm.alma3.af1 <<" e5bhs "<< gm.alma3.e5bhs<<" e1bhs "<< gm.alma3.e1bhs <<" a0g " << gm.a0g <<" a1g "<< gm.a1g <<" t0g "<<gm.t0g <<" wn0g "<<gm.wn0g;
+        cout<<"  alma3.sv "<<gmwtypes[{sv,9}].alma3.svid <<" af0 "<<gm.alma3.af0<<" af1 "<< gm.alma3.af1 <<" e5bhs "<< gm.alma3.e5bhs<<" e1bhs "<< gm.alma3.e1bhs <<" a0g " << gm.a0g <<" a1g "<< gm.a1g <<" t0g "<<gm.t0g <<" wn0g "<<gm.wn0g <<" delta-gps "<< gm.getGPSOffset(gm.tow, gm.wn).first<<"ns";
+
+        int dw = (int)(gm.wn%64) - (int)(gm.wn0g);
+        if(dw > 31)
+          dw = 31- dw;
+        int delta = dw*7*86400  + gm.tow - gm.getT0g(); // NOT ephemeris age tricks
+        cout<<" wn%64 "<< (gm.wn%64) << " dw " << dw <<" delta " << delta;
       }
       
       cout<<endl;      
+    }
+    else if(nmm.type() == NavMonMessage::GalileoCnavType) {
+      basic_string<uint8_t> cnav((uint8_t*)nmm.gc().contents().c_str(), nmm.gc().contents().size());
+      int sv = nmm.gc().gnsssv();
+      if(!svfilter.check(2, sv, nmm.gc().sigid()))
+        continue;
+      etstamp();
+      cout << "C/NAV for " << nmm.gc().gnssid()<<","<<nmm.gc().gnsssv()<<","<<nmm.gc().sigid() <<": "<< makeHexDump(cnav)<<endl;
+
+    }
+    else if(nmm.type() == NavMonMessage::GalileoFnavType) {
+      basic_string<uint8_t> fnav((uint8_t*)nmm.gf().contents().c_str(), nmm.gf().contents().size());
+      int sv = nmm.gf().gnsssv();
+      if(!svfilter.check(2, sv, nmm.gf().sigid()))
+        continue;
+      etstamp();
+      GalileoMessage gm;
+      gm.parseFnav(fnav);
+      cout<<"gal F/NAV wtype "<< (int)gm.wtype << " for "<<nmm.gf().gnssid()<<","<<nmm.gf().gnsssv()<<","<<nmm.gf().sigid();
+      if(gm.wtype ==1 || gm.wtype == 2 || gm.wtype == 3 || gm.wtype == 4)
+        cout<<" iodnav " <<gm.iodnav <<" tow " << gm.tow;
+      if(gm.wtype == 1) {
+        cout <<" af0 "<<gm.af0 << " af1 "<<gm.af1 <<" af2 "<< (int)gm.af2;
+      }
+      if(gm.wtype == 2) {
+        cout <<" sqrtA "<<gm.sqrtA;
+      }
+      if(gm.wtype == 3) {
+        cout <<" t0e "<<gm.t0e;
+      }
+      if(gm.wtype == 4) {
+        cout <<" dtLS "<<(int)gm.dtLS;
+      }
+
+      cout<<endl;
     }
     else if(nmm.type() == NavMonMessage::GPSInavType) {
       int sv = nmm.gpsi().gnsssv();
@@ -561,7 +606,7 @@ try
       if(frame == 1) {
 
         gpswn = gs.wn;
-        cout << "gpshealth = "<<(int)gs.gpshealth<<", wn "<<gs.wn << " t0c "<<gs.t0c << " af0 " << gs.af0 << " af1 " << gs.af1 <<" af2 " << gs.af2;
+        cout << "gpshealth = "<<(int)gs.gpshealth<<", wn "<<gs.wn << " t0c "<<gs.t0c << " af0 " << gs.af0 << " af1 " << gs.af1 <<" af2 " << (int)gs.af2;
         if(auto iter = oldgs1s.find(sv); iter != oldgs1s.end() && iter->second.t0c != gs.t0c) {
           auto oldOffset = getGPSAtomicOffset(gs.tow, iter->second);
           auto newOffset = getGPSAtomicOffset(gs.tow, gs);
@@ -693,8 +738,48 @@ try
           cout<<makeSatIDName(cd.id)<<":  dclock0 "<< cd.dclock0 <<" dclock1 " << cd.dclock1 <<" dclock2 "<< cd.dclock2 << endl;
         }
       }
-      else
+      else if(rm.type == 1045 || rm.type == 1046) {
+        static ofstream af0inavstr("af0inav.csv"), af0fnavstr("af0fnav.csv"), bgdstr("bgdstr.csv");
+        static bool first{true};
+
+        if(first) {
+          af0inavstr<<"timestamp sv wn t0c af0 af1\n";
+          af0fnavstr<<"timestamp sv wn t0c af0 af1\n";
+          first=false;
+        }
+        SatID sid;
+        sid.gnss = 2;
+        sid.sv = rm.d_sv;
+        sid.sigid = (rm.type == 1045) ? 5 : 1;
+        
+        cout<< makeSatIDName(sid)<<" ";
+        if(rm.type == 1045) {
+          af0fnavstr << nmm.localutcseconds()<<" " << rm.d_sv <<" " << rm.d_gm.wn<<" "<< rm.d_gm.t0c << " " << rm.d_gm.af0 << " " << rm.d_gm.af1<<"\n";
+          cout<<"F/NAV";
+        }
+        else {
+          af0inavstr << nmm.localutcseconds() <<" " << rm.d_sv <<" " << rm.d_gm.wn<<" "<<rm.d_gm.t0c<<" "<< rm.d_gm.af0 << " " << rm.d_gm.af1<<"\n";
+          bgdstr << nmm.localutcseconds() <<" " << rm.d_sv<<" " <<rm.d_gm.BGDE1E5a <<" " << rm.d_gm.BGDE1E5b << "\n";
+          cout <<"I/NAV";
+        }
+
+        cout <<" iode " << rm.d_gm.iodnav << " sisa " << (unsigned int) rm.d_gm.sisa << " t0c " << rm.d_gm.t0c << " af0 "<<rm.d_gm.af0 <<" af1 " << rm.d_gm.af1 <<" af2 " << (int) rm.d_gm.af2 << " BGDE1E5a " << rm.d_gm.BGDE1E5a;
+        if(rm.type == 1046) // I/NAV
+          cout <<" BGDE1E5b "<< rm.d_gm.BGDE1E5b;
         cout<<endl;
+      }
+      else if(rm.type == 1059 || rm.type==1242) {
+        cout<<"\n";
+        for(const auto& dcb : rm.d_dcbs) {
+          cout<<"   "<<makeSatIDName(dcb.first)<<":  "<<dcb.second<<" meters\n";
+        }
+
+        cout<<endl;
+      }
+      else {
+        cout<<" len " << nmm.rm().contents().size() << endl;
+        
+      }
 
     }
     else if(nmm.type() == NavMonMessage::GPSCnavType) {
@@ -746,7 +831,7 @@ try
           cout<<"  Timejump: "<<oldOffset.first - newOffset.first<<" after "<<(bm.getT0c() - msgs[sv].getT0c() )<<" seconds";
         }
         msgs[sv]=bm;
-        cout<<" wn "<<bm.wn<<" t0c "<<(int)bm.t0c<<" aodc "<< (int)bm.aodc <<" aode "<< (int)bm.aode <<" sath1 "<< (int)bm.sath1 << " urai "<<(int)bm.urai << " af0 "<<bm.a0 <<" af1 " <<bm.a1 <<" af2 "<<bm.a2;
+        cout<<" wn "<<bm.wn<<" t0c "<<(int)bm.t0c<<" aodc "<< (int)bm.aodc <<" aode "<< (int)bm.aode <<" sath1 "<< (int)bm.sath1 << " urai "<<(int)bm.urai << " af0 "<<bm.a0 <<" af1 " <<bm.a1 <<" af2 "<< (int)bm.a2;
         auto offset = bm.getAtomicOffset();
         cout<< ", "<<offset.first<<"ns " << (offset.second * 3600) <<" ns/hour "<< ephAge(bm.sow, bm.t0c*8);
       }

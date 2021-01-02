@@ -84,6 +84,8 @@ private:
 struct IntervalStat
 {
   std::optional<int> unhealthy;
+  std::optional<int> dataunhealthy;
+  std::optional<int> osnma;
   std::optional<int> sisa;
   bool ripe{false};
   bool expired{false};
@@ -95,6 +97,7 @@ struct IntervalStat
 map<SatID, map<time_t,IntervalStat>> g_stats;
 
 int main(int argc, char **argv)
+try
 {
   MiniCurl mc;
   MiniCurl::MiniCurlHeaders mch;
@@ -110,14 +113,20 @@ int main(int argc, char **argv)
   string beginarg, endarg;
   string sp3src("default");
   int gnssid=2;
+  int rtcmsrc=300;
+  int galwn=-1;
+  string influxserver="http://127.0.0.1:8086";
   app.add_flag("--version", doVERSION, "show program version and copyright");
   app.add_option("--period,-p", periodarg, "period over which to report (1h, 1w)");
   app.add_option("--begin,-b", beginarg, "Beginning");
   app.add_option("--end,-e", endarg, "End");
+  app.add_option("--gal-wn", galwn, "Galileo week number to report on");
   app.add_option("--sp3src", sp3src, "Identifier of SP3 source");
+  app.add_option("--rtcmsrc", rtcmsrc, "Identifier of RTCM source");
   app.add_option("--sigid,-s", sigid, "Signal identifier. 1 or 5 for Galileo.");
   app.add_option("--gnssid,-g", gnssid, "gnssid, 0 GPS, 2 Galileo");
   app.add_option("--influxdb", influxDBName, "Name of influxdb database");
+  app.add_option("--influxserver", influxserver, "Address of influx server");
   try {
     app.parse(argc, argv);
   } catch(const CLI::Error &e) {
@@ -129,7 +138,11 @@ int main(int argc, char **argv)
     exit(0);
   }
 
-  if(beginarg.empty() && endarg.empty()) 
+  if(galwn>= 0) {
+    time_t w = utcFromGST(galwn, 0);
+    period = "time >= '"+influxTime(w)+"' and time < '"+influxTime(w+7*86400) +"'";
+  }
+  else if(beginarg.empty() && endarg.empty()) 
     period = "time > now() - "+periodarg;
   else {
     period = "time > '"+ beginarg +"' and time <= '" + endarg +"'";
@@ -140,13 +153,16 @@ int main(int argc, char **argv)
 
   // auto res = mc.getURL(url + mc.urlEncode("select distinct(value) from sisa where "+period+" and sigid='"+to_string(sigid)+"' group by gnssid,sv,sigid,time(10m)"));
 
-
-  
-  string url="http://127.0.0.1:8086/query?db="+influxDBName+"&epoch=s&q=";
+  if(influxserver.find("http"))
+    influxserver="http://"+influxserver;
+  if(influxserver.empty() || influxserver[influxserver.size()-1]!='/')
+    influxserver+="/";
+  string url=influxserver+"query?db="+influxDBName+"&epoch=s&q=";
   string sisaname = (gnssid==2) ? "sisa" : "gpsura";
   string query="select distinct(value) from "+sisaname+" where "+period+" and sigid='"+to_string(sigid)+"' group by gnssid,sv,sigid,time(10m)";
 
   cout<<"query: "<<query<<endl;
+  cout<<"url: "<<(url + mc.urlEncode(query))<<endl;
   auto res = mc.getURL(url + mc.urlEncode(query));
 
   auto j = nlohmann::json::parse(res);
@@ -172,13 +188,44 @@ int main(int argc, char **argv)
     const auto& tags=sv["tags"];
     SatID id{(unsigned int)std::stoi((string)tags["gnssid"]), (unsigned int)std::stoi((string)tags["sv"]), (unsigned int)std::stoi((string)tags["sigid"])};
 
-
     for(const auto& v : sv["values"]) {
       auto healthy = (int)v[1];
       g_stats[id][(int)v[0]].unhealthy = healthy; // hngg
     }
   }
 
+  if(gnssid == 2) {
+    res = mc.getURL(url + mc.urlEncode("select distinct(e1bdvs) from galhealth where "+period+" and sigid='"+to_string(sigid)+"' group by gnssid,sv,sigid,time(10m)"));
+    j = nlohmann::json::parse(res);
+    
+    for(const auto& sv : j["results"][0]["series"]) {
+      const auto& tags=sv["tags"];
+      SatID id{(unsigned int)std::stoi((string)tags["gnssid"]), (unsigned int)std::stoi((string)tags["sv"]), (unsigned int)std::stoi((string)tags["sigid"])};
+      
+      for(const auto& v : sv["values"]) {
+	auto dhealthy = (int)v[1]; // if true, "working without guarantee"
+	g_stats[id][(int)v[0]].dataunhealthy = dhealthy; 
+      }
+    }
+  }  
+  res = mc.getURL(url + mc.urlEncode("select count(\"field\") from osnma where "+period+" and sigid='"+to_string(sigid)+"' group by gnssid,sv,sigid,time(10m)"));
+  j = nlohmann::json::parse(res);
+  
+  for(const auto& sv : j["results"][0]["series"]) {
+    const auto& tags=sv["tags"];
+    SatID id{(unsigned int)std::stoi((string)tags["gnssid"]), (unsigned int)std::stoi((string)tags["sv"]), (unsigned int)std::stoi((string)tags["sigid"])};
+
+
+    for(const auto& v : sv["values"]) {
+      auto osnma = (int)v[1];
+      if(!g_stats[id][(int)v[0]].osnma)
+	g_stats[id][(int)v[0]].osnma = osnma;
+      else
+	(*g_stats[id][(int)v[0]].osnma) += osnma;
+    }
+  }
+
+  
   res = mc.getURL(url + mc.urlEncode("select max(\"eph-age\") from ephemeris where "+period+" and sigid='"+to_string(sigid)+"' group by gnssid,sv,sigid,time(10m)"));
   j = nlohmann::json::parse(res);
   for(const auto& sv : j["results"][0]["series"]) {
@@ -204,7 +251,7 @@ int main(int argc, char **argv)
   ///////////////////// rtcm-eph
 
   
-  string rtcmQuery = "select mean(\"radial\") from \"rtcm-eph-correction\" where "+period+" and sigid='"+to_string(sigid)+"' and gnssid='"+to_string(gnssid)+"' group by gnssid,sv,sigid,time(10m)";
+  string rtcmQuery = "select mean(\"radial\") from \"rtcm-eph-correction\" where "+period+" and sigid='"+to_string(sigid)+"' and gnssid='"+to_string(gnssid)+"' and src='"+to_string(rtcmsrc)+"' group by gnssid,sv,sigid,time(10m)";
   cout<<"rtcmquery: "<<rtcmQuery<<endl;
   res = mc.getURL(url + mc.urlEncode(rtcmQuery));
   j = nlohmann::json::parse(res);
@@ -231,7 +278,7 @@ int main(int argc, char **argv)
   ///////////////////// rtcm-clock
 
   
-  string rtcmClockQuery = "select mean(\"dclock0\") from \"rtcm-clock-correction\" where "+period+" and sigid='"+to_string(sigid)+"' and gnssid='"+to_string(gnssid)+"' group by gnssid,sv,sigid,time(10m)";
+  string rtcmClockQuery = "select mean(\"dclock0\") from \"rtcm-clock-correction\" where "+period+" and sigid='"+to_string(sigid)+"' and gnssid='"+to_string(gnssid)+"' and src='"+to_string(rtcmsrc)+"' group by gnssid,sv,sigid,time(10m)";
   cout<<"rtcmquery: "<<rtcmClockQuery<<endl;
   res = mc.getURL(url + mc.urlEncode(rtcmClockQuery));
   j = nlohmann::json::parse(res);
@@ -242,7 +289,8 @@ int main(int argc, char **argv)
       for(const auto& v : sv["values"]) {
         try {
           auto val = (double) v[1]; // might trigger an exception
-          g_stats[id][(int)v[0]].rtcmDClock = val;
+          if(g_stats.count(id)) // we have some bad data it appears
+            g_stats[id][(int)v[0]].rtcmDClock = val;
         }
         catch(...){ continue; }
       }
@@ -500,13 +548,51 @@ int main(int argc, char **argv)
     }
   }
 
+  ///// 
+  string dishesQuery = "select iod,sv from \"ephemeris-actual\" where "+period+" and sigid='"+to_string(sigid)+"' and gnssid='"+to_string(gnssid)+"' and iod < 128";
+  cout<<"dishesquery: "<<dishesQuery<<endl;
+  res = mc.getURL(url + mc.urlEncode(dishesQuery));
+  cout<<res<<endl;
+  j = nlohmann::json::parse(res);
+  map<time_t, set<int>> dishcount;
+  set<int> totsvs;
+  for(const auto& sv : j["results"][0]["series"]) {
+    for(const auto& v : sv["values"]) {
+      try {
+	int sv = (unsigned int)std::stoi((string)v[2]);
+	int t = (int)v[0];
+	//	t &= (~31);
+	dishcount[t].insert(sv);
+	totsvs.insert(sv);
+      }
+      catch(exception& e) {
+	cerr<<"error: "<<e.what()<<endl;
+	continue;
+      }
+    }
+  }
+  map<time_t, unsigned int> maxcounts;
+  for(const auto& dc : dishcount) {
+    auto& bin = maxcounts[dc.first - (dc.first % 3600)];
+    if(bin < dc.second.size())
+      bin = dc.second.size();
+    cout << dc.first<<" "<<humanTimeShort(dc.first) <<", " << fmt::sprintf("%2d", dc.second.size())<<": ";
+    for(const auto& n : totsvs) {
+      if(dc.second.count(n))
+	cout<<fmt::sprintf("%2d ", n);
+      else
+	cout<<"   ";
+    }
+    cout<<"\n";
+  }
+
+  ofstream hrcounts("hrcounts.csv");
+  hrcounts<<"timestamp,dishcount\n";
+  for(const auto& mc: maxcounts)
+    hrcounts<<mc.first<<","<<mc.second<<"\n";
   
   /////////////////////
   
-  g_stats.erase({2,14,1});
-  g_stats.erase({2,18,1});
-  g_stats.erase({2,14,5});
-  g_stats.erase({2,18,5});
   /*
   g_stats[{2,19,1}];
   */
@@ -537,6 +623,7 @@ int main(int argc, char **argv)
   int totunobserved=0;
   int totripe = 0,  totexpired = 0;
   Stats totRTCM;
+  ofstream texstream("stats.tex");
   for(const auto& sv : g_stats) {
 
     int napa=0, unhealthy=0, healthy=0, testing=0, ripe=0, expired=0;
@@ -564,7 +651,10 @@ int main(int argc, char **argv)
         else if(*i.second.unhealthy==3)
           testing++;
         else {
-          if(i.second.sisa) {
+	  if(i.second.dataunhealthy && *i.second.dataunhealthy) {  // this is 'working without guarantee'
+	    unhealthy++;
+	  }
+	  else if(i.second.sisa) {
             if(*i.second.sisa == 255)
               napa++;
             else
@@ -587,6 +677,7 @@ int main(int argc, char **argv)
     totripe += ripe;
     totexpired += expired;
     int liveInterval=0;
+
     for(const auto i : sv.second)
       if(i.second.sisa.has_value())
         liveInterval++;
@@ -604,6 +695,16 @@ int main(int argc, char **argv)
                        100.0*ripe/maxintervals,
                        100.0*expired/maxintervals);
 
+    texstream << fmt::sprintf("%s & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%%\\\\",
+                       makeSatPartialName(sv.first),
+                       100.0*(maxintervals-liveInterval)/maxintervals,
+                       100.0*unhealthy/maxintervals,
+                       100.0*healthy/maxintervals,
+                       100.0*testing/maxintervals,
+                       100.0*napa/maxintervals,
+                       100.0*ripe/maxintervals,
+                             100.0*expired/maxintervals) << endl;
+    
     if(!rtcm.empty()) 
       cout<<fmt::sprintf(", %.1f - %.1f - %.1f cm",
                          rtcm.done().quantile(0.10)/10, rtcm.done().median()/10, rtcm.done().quantile(0.9)/10);
@@ -622,6 +723,9 @@ int main(int argc, char **argv)
     cout<<endl;
     
   }
+
+ 
+  
   cout<<"------------------------------------------------------------------------------------------"<<endl;
   cout<<fmt::sprintf("Tot: %6.2f%% unobserved, %6.2f%% unhealthy, %6.2f%% healthy, %6.2f%% testing, %6.2f%% napa, %6.2f%% ripe, %6.2f%% expired",
                      100.0*(totunobserved)/maxintervals/g_stats.size(),
@@ -631,6 +735,17 @@ int main(int argc, char **argv)
                      100.0*totnapa/maxintervals/g_stats.size(),
                      100.0*totripe/maxintervals/g_stats.size(),
                      100.0*totexpired/maxintervals/g_stats.size());
+
+  texstream<<fmt::sprintf("\\hline\nTot & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%% & %6.2f\\%%\\\\",
+                     100.0*(totunobserved)/maxintervals/g_stats.size(),
+                     100.0*totunhealthy/maxintervals/g_stats.size(),
+                     100.0*tothealthy/maxintervals/g_stats.size(),
+                     100.0*tottesting/maxintervals/g_stats.size(),
+                     100.0*totnapa/maxintervals/g_stats.size(),
+                     100.0*totripe/maxintervals/g_stats.size(),
+                          100.0*totexpired/maxintervals/g_stats.size()) <<endl;
+
+
   if(!totRTCM.empty())
     cout<<fmt::sprintf(", %.1f - %.1f - %.1f cm",
                        totRTCM.done().quantile(0.10)/10, totRTCM.done().median()/10, totRTCM.done().quantile(0.9)/10);
@@ -638,5 +753,9 @@ int main(int argc, char **argv)
   cout<<endl;
 
 }
-
+catch(exception& e)
+{
+  cerr<<"Fatal error: "<<e.what()<<endl;
+  return EXIT_FAILURE;
+}
 

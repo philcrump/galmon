@@ -4,14 +4,17 @@ galileo/GPS/GLONASS/BeiDou open source monitoring. GPL3 licensed.
 
 Live website: https://galmon.eu/
 
-Theoretically multi-vendor, although currently only the U-blox 8 and 9
-chipsets are supported.  Navilock NL-8012U receiver works really well, as
-does the U-blox evaluation kit for the 8MT.  In addition, many stations have
-reported success with this very cheap [AliExpress sourced
-device](https://www.aliexpress.com/item/32816656706.html).  The best and
-most high-end receiver, which does all bands, all the time, is the Ublox
-F9P, several of us use the
-[ArdusimpleRTK2B](https://www.ardusimple.com/simplertk2b/) board.
+Multi-vendor, with support for U-blox 8 and 9 chipsets and many Septentrio
+devices.  Navilock NL-8012U receiver works really well, as does the U-blox
+evaluation kit for the 8MT.  In addition, many stations have reported
+success with this very cheap [AliExpress sourced
+device](https://www.aliexpress.com/item/32816656706.html).  
+
+For ublox, there is good support for the F9P, several of us use the
+[ArdusimpleRTK2B](https://www.ardusimple.com/simplertk2b/) board. It adds
+the Galileo E5b band.
+
+Septentrio devices support even more bands.
 
 An annotated presentation about our project aimed at GNSS professionals can
 be found [here](https://berthub.eu/galileo/The%20galmon.eu%20project.pdf). 
@@ -29,9 +32,10 @@ guidelines](https://github.com/ahupowerdns/galmon/blob/master/Operator.md).
 Highlights
 ----------
 
+ * Support for Septentrio and U-blox.
  * Processes raw frames/strings/words from GPS, GLONASS, BeiDou and Galileo
- * All-band support (E1, E5b, B1I, B2I, Glonass L1, Glonass L2, GPS L1C/A)
-   so far, GPS L2C and Galileo E5a pending).
+ * All-band support (E1, E5a, E5b, B1I, B2I, Glonass L1, Glonass L2, GPS L1C/A)
+   so far.
  * Calculate ephemeris positions
  * Comparison of ephemerides to independent SP3 data to determine SISE
    * Globally, locally, worst user location
@@ -79,7 +83,7 @@ To build everything, including the webserver, try:
 
 ```
 apt-get install protobuf-compiler libh2o-dev libcurl4-openssl-dev libssl-dev libprotobuf-dev \
-libh2o-evloop-dev libwslay-dev libncurses5-dev libeigen3-dev libzstd-dev
+libh2o-evloop-dev libwslay-dev libncurses5-dev libeigen3-dev libzstd-dev g++
 git clone https://github.com/ahupowerdns/galmon.git --recursive
 cd galmon
 make
@@ -96,21 +100,21 @@ Running in Docker
 -----------------
 
 We publish official Docker images for galmon on
-[docker hub](https://hub.docker.com/r/faucet/faucet) for multiple architectures.
+[docker hub](https://hub.docker.com/r/berthubert/galmon) for multiple architectures.
 
 To run a container with a shell in there (this will also expose a port so you
 can view the UI too and assumes a ublox GPS device too -
 you may need to tweak as necessary):
 
 ```
-docker run -it --rm --device=/dev/ttyACM0 -p 10000:10000 galmon/galmon
+docker run -it --rm --device=/dev/ttyACM0 -p 10000:10000 berthubert/galmon
 ```
 
 Running a daemonized docker container reporting data to a remote server
 might look like:
 
 ```
-docker run -d --restart=always --device=/dev/ttyACM0 --name=galmon galmon/galmon /galmon/ubxtool --wait --port /dev/ttyACM0 --gps --galileo --glonass --destination [server] --station [station-id] --owner [owner]
+docker run -d --restart=always --device=/dev/ttyACM0 --name=galmon berthubert/galmon ubxtool --wait --port /dev/ttyACM0 --gps --galileo --glonass --destination [server] --station [station-id] --owner [owner]
 ```
 
 To make your docker container update automatically you could use a tool such as
@@ -118,9 +122,14 @@ To make your docker container update automatically you could use a tool such as
 
 Running
 -------
-
+On u-blox: 
 Once compiled, run for example `./ubxtool --wait --port /dev/ttyACM0
 --station 1 --stdout --galileo | ./navparse --bind [::1]:10000`
+
+For Septentrio, try: `nc 192.168.1.1 29000 | ./septool --station x --stdout |
+./navparse --bind [::1]:10000`, assuming your Septentrio can be reached on
+192.168.1.1.1 and you have defined an SBF stream on port 29000. For more
+details, please see below.
 
 Next up, browse to http://[::1]:10000 (or try http://localhost:10000/ and
 you should be in business. ubxtool changes (non-permanently) the
@@ -159,6 +168,10 @@ Tooling:
  * ubxtool: can configure a u-blox 8 chipset, parses its output & will
    convert it into a protbuf stream of GNSS NAV frames + metadata
    Adds 64-bit timestamps plus origin information to each message
+ * septool: ingests the Septentrio binary format (SBF) and converts it to our
+   protobuf format. Supports same protocol as ubxtool.
+ * rtcmtool: ingest ntripclient output, decodes RTCM messages and converts
+   them to our protobuf format
  * xtool: if you have another chipset, build something that extracts NAV
    frames & metadata. Not done yet.
  * navrecv: receives GNSS NAV frames and stores them on disk, split out per
@@ -229,6 +242,47 @@ This also works for `navparse` for the pretty website and influx storage, `nc 12
 if you have an influxdb running on localhost with a galileo database in there.
 The default URL is http://127.0.0.1:29599/ 
 
+Septentrio specifics
+--------------------
+Unlike `ubxtool`, our `septool` does not (re)configure your Septentrio
+device. Instead, the tool expects Septentrio Binary Format (SBF) on input,
+and that this stream includes at least the following messages:
+
+ * MeasEpoch
+ * PVTCartesian
+
+We currently parse and understand:
+ * GALRawFNAV
+ * GALRawINAV
+
+Support will be added soon for:
+ * GPSRawCA
+ * GPSRawL2C
+ * GPSRawL5
+ * GLORawCA
+ * BDSRaw
+ * BDSRawB1C
+ * BDSRawB2a
+
+A typical invocation of `septool` looks like this:
+
+```
+nc 192.168.1.1 29000 | ./septool --station x --destination galmon-eu-server.example.com
+```
+
+Or to test, try:
+
+```
+nc 192.168.1.1 29000 | ./septool --station x --stdout | ./navdump
+```
+
+This is assuming that you can reach your Septentrio on 192.168.1.1 and that
+you have defined a TCP server stream on port 29000. 
+
+Septool will also accept input from a serial port or basically anything that
+can provide SBF. Please let us know if our tooling can make your life
+easier.
+
 Internals
 ---------
 The transport format consists of repeats of:
@@ -275,16 +329,26 @@ The software can interpret SP3 files, good sources:
      to have less of a delay than the ESA ESM series.
    * GBU = ultra rapid, still a few days delay, but much more recent.
 
-Uncompress and concatenate all downloaded files into 'all.sp3' and run
-'navdump ' on collected protobuf, and it will output 'sp3.csv' with fit data.
-
 To get SP3 GBM from GFZ Potsdam for GPS week number 2111:
 
 ```
 WN=2111
 lftp -c "mget ftp://ftp.gfz-potsdam.de/GNSS/products/mgnss/${WN}/gbm*sp3.Z"
+gunzip gbm*sp3.Z
 ```
 
+To feed data, use: 
+
+```
+./sp3feed --sp3src=gbm --influxdb=galileo gbm*sp3
+```
+
+This will populate the sp3 tables in the database. A subsequent run of
+`reporter`, while setting the `--sp3src` parameter, will provide SP3
+deviation statistics, and fill out the `sp3delta` table in there, which
+stores deviations from the SP3 provided position, per sp3src.
+
+Further interesting (ephemeris) data is on http://mgex.igs.org/IGS_MGEX_Products.php
 
 RTCM
 ----

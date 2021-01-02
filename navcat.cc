@@ -26,29 +26,7 @@ using namespace std;
 
 extern const char* g_gitHash;
 
-time_t parseTime(std::string_view in)
-{
-  time_t now=time(0);
-
-  vector<string> formats({"%Y-%m-%d %H:%M", "%Y%m%d %H%M", "%H:%M", "%H%M"});
-  for(const auto& f : formats) {
-    struct tm tm;
-    memset(&tm, 0, sizeof(tm));
-
-    localtime_r(&now, &tm);
-    tm.tm_isdst = -1;
-    tm.tm_sec = 0;
-    char* res = strptime(&in[0], f.c_str(), &tm);
-    if(res && !*res) {
-      cerr<<"Matched on "<<f<<endl;
-      return mktime(&tm);
-    }
-  }
-  
-  throw runtime_error("Can only parse %Y-%m-%d %H:%M");
-}
-
-
+// get all stations (numerical) from a directory
 vector<uint64_t> getSources(string_view dirname)
 {
   DIR *dir = opendir(&dirname[0]);
@@ -76,8 +54,13 @@ vector<uint64_t> getSources(string_view dirname)
   return ret;
 }
 
+static bool operator==(const timespec& a, const timespec& b)
+{
+  return a.tv_sec == b.tv_sec && a.tv_nsec && b.tv_nsec;
+}
 
-void sendProtobuf(string_view dir, time_t startTime, time_t stopTime=0)
+// send protobuf data from the named directories and stations, between start and stoptime
+void sendProtobuf(const vector<string>& dirs, vector<uint64_t> stations, time_t startTime, time_t stopTime=0)
 {
   timespec start;
   start.tv_sec = startTime;
@@ -88,44 +71,54 @@ void sendProtobuf(string_view dir, time_t startTime, time_t stopTime=0)
   vector<pair<timespec,string> > rnmms;
 
   for(;;) {
-    cerr<<"Gathering data"<<endl;
-    auto srcs = getSources(dir);
     rnmms.clear();
-    for(const auto& src: srcs) {
-      string fname = getPath(dir, start.tv_sec, src);
-      FILE* fp = fopen(fname.c_str(), "r");
-      if(!fp)
-        continue;
-      uint32_t offset= fpos[fname];
-      if(fseek(fp, offset, SEEK_SET) < 0) {
-        cerr<<"Error seeking: "<<strerror(errno) <<endl;
-        fclose(fp);
-        continue;
-      }
-      //      cerr <<"Seeked to position "<<fpos[fname]<<" of "<<fname<<endl;
-
-      uint32_t looked=0;
-      string msg;
-      struct timespec ts;
-      while(getRawNMM(fp, ts, msg, offset)) {
-        // don't drop data that is only 5 seconds too old
-        if(make_pair(ts.tv_sec + 5, ts.tv_nsec) >= make_pair(start.tv_sec, start.tv_nsec)) {
-          rnmms.push_back({ts, msg});
+    for(const auto& dir : dirs) {
+      cerr<<"Gathering data from "<<humanTime(start.tv_sec)<<" from "<<dir<<".. ";
+          
+      vector<uint64_t> srcs = stations.empty() ? getSources(dir) : stations;
+      int count=0;
+      for(const auto& src: srcs) {
+        string fname = getPath(dir, start.tv_sec, src);
+        FILE* fp = fopen(fname.c_str(), "r");
+        if(!fp)
+          continue;
+        uint32_t offset= fpos[fname];
+        if(fseek(fp, offset, SEEK_SET) < 0) {
+          cerr<<"Error seeking: "<<strerror(errno) <<endl;
+          fclose(fp);
+          continue;
         }
-        ++looked;
-      }
-      //      cerr<<"Harvested "<<rnmms.size()<<" events out of "<<looked<<endl;
-      fpos[fname]=offset;
-      fclose(fp);
-    }
+        //      cerr <<"Seeked to position "<<fpos[fname]<<" of "<<fname<<endl;
+        
+        string msg;
+        struct timespec ts;
+        while(getRawNMM(fp, ts, msg, offset)) {
+          // don't drop data that is only 5 seconds too old
+          if(make_pair(ts.tv_sec + 5, ts.tv_nsec) >= make_pair(start.tv_sec, start.tv_nsec)) {
+            rnmms.push_back({ts, msg});
+            ++count;
+          }
+        }
+        //      cerr<<"Harvested "<<rnmms.size()<<" events out of "<<looked<<endl;
 
-    cerr<<"Sorting data"<<endl;
+        fpos[fname]=offset;
+        fclose(fp);
+      }
+      cerr<<" added "<<count<<endl;
+    }
+    //    cerr<<"Sorting data"<<endl;
     sort(rnmms.begin(), rnmms.end(), [](const auto& a, const auto& b)
          {
            return std::tie(a.first.tv_sec, a.first.tv_nsec)
                 < std::tie(b.first.tv_sec, b.first.tv_nsec);
          });
-    cerr<<"Sending data"<<endl;
+
+    auto newend=unique(rnmms.begin(), rnmms.end());
+    cerr<<"Removed "<<rnmms.end() - newend <<" duplicates, ";
+    
+    rnmms.erase(newend, rnmms.end());
+    cerr<<"sending data"<<endl;
+    unsigned int count=0;
     for(const auto& nmm: rnmms) {
       if(nmm.first.tv_sec > stopTime)
         break;
@@ -135,8 +128,9 @@ void sendProtobuf(string_view dir, time_t startTime, time_t stopTime=0)
       buf += nmm.second;
       //fwrite(buf.c_str(), 1, buf.size(), stdout);
       writen2(1, buf.c_str(), buf.size());
+      ++count;
     }
-    cerr<<"Done sending"<<endl;
+    cerr<<"Done sending " << count<<" messages"<<endl;
     if(3600 + start.tv_sec - (start.tv_sec%3600) < stopTime)
       start.tv_sec = 3600 + start.tv_sec - (start.tv_sec%3600);
     else {
@@ -149,32 +143,46 @@ void sendProtobuf(string_view dir, time_t startTime, time_t stopTime=0)
 int main(int argc, char** argv)
 {
   bool doVERSION{false};
-  /*
+
   CLI::App app(program);
-
+  string beginarg, endarg;
+  vector<string> storages;
+  int galwn{-1};
+  app.add_option("--storage,-s", storages, "Locations of storage files");  
+  vector<uint64_t> stations;
   app.add_flag("--version", doVERSION, "show program version and copyright");
-  app.allow_extras(true); // allow bare positional parameters
-  try {
-    app.parse(argc, argv);
-  } catch(const CLI::Error &e) {
-    return app.exit(e);
-  }
+  app.add_option("--begin,-b", beginarg, "Begin time (2020-01-01 00:00, or 12:30)");
+  app.add_option("--end,-e", endarg, "End time. Now if omitted");
+  app.add_option("--stations", stations, "only send data from listed stations");
+  app.add_option("--gal-wn", galwn, "Galileo week number to report on");
+  CLI11_PARSE(app, argc, argv);
 
+  
   if(doVERSION) {
     showVersion(program, g_gitHash);
     exit(0);
   }
-  */
-  signal(SIGPIPE, SIG_IGN);
-  if(argc < 3) {
-    cout<<"Syntax: navcat storage start stop"<<endl;
-    cout<<"Example: ./navcat storage \"2020-01-01 00:00\" \"2020-01-02 00:00\" | ./navdump  "<<endl;
-    return(EXIT_FAILURE);
+
+  time_t startTime, stopTime;
+  if(galwn >=0) {
+    startTime=utcFromGST(galwn, 0);
+    stopTime=startTime + 7*86400;
   }
-  time_t startTime = parseTime(argv[2]);
-  time_t stopTime = parseTime(argv[3]);
+  else if(!beginarg.empty()) {
+    startTime = parseTime(beginarg);
+    stopTime = endarg.empty()  ? time(0) :  parseTime(endarg);
+  }
+  else {
+    cerr<<"No time range specified, use -b or --gal-wn"<<endl;
+    return 1;
+  }
 
   cerr<<"Emitting from "<<humanTime(startTime) << " to " << humanTime(stopTime) << endl;
-  sendProtobuf(argv[1], startTime, stopTime);
-  
+  if(!stations.empty()) {
+    cerr<<"Restricting to stations:";
+    for(const auto& s : stations)
+      cerr<<" "<<s;
+    cerr<<endl;
+  }
+  sendProtobuf(storages, stations, startTime, stopTime);
 }

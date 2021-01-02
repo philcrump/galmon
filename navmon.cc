@@ -9,7 +9,7 @@
 #include <signal.h>
 #include <sys/poll.h>
 #include <iostream>
-
+#include <vector>
 using namespace std;
 
 using Clock = std::chrono::steady_clock; 
@@ -159,6 +159,18 @@ std::string humanTimeShort(time_t t)
   return buffer;
 }
 
+// influx ascii time format, in UTC
+std::string influxTime(time_t t)
+{
+  struct tm tm={0};
+  gmtime_r(&t, &tm);
+
+  char buffer[80];
+  std::string fmt = "%Y-%m-%d %H:%M:%S";
+  
+  strftime(buffer, sizeof(buffer), fmt.c_str(), &tm);
+  return buffer;
+}
 
 std::string humanTime(time_t t, uint32_t nanoseconds)
 {
@@ -280,6 +292,20 @@ std::string makeSatPartialName(const SatID& satid)
   return fmt::sprintf("%c%02d", getGNSSChar(satid.gnss), satid.sv);
 }
 
+void getGPSDateFromUTC(time_t t, int& wn, int& tow)
+{
+  t -= 315964800;
+  t += 18;
+  wn = t/(7*86400);
+  tow = t%(7*86400);
+}
+void getGalDateFromUTC(time_t t, int& wn, int& tow)
+{
+  t -= 935280000;
+  t += 18;
+  wn = t/(7*86400);
+  tow = t%(7*86400);
+}
 
 int g_dtLS{18}, g_dtLSBeidou{4};
 uint64_t utcFromGST(int wn, int tow)
@@ -298,6 +324,19 @@ double utcFromGPS(int wn, double tow)
 }
 
 string makeHexDump(const string& str)
+{
+  char tmp[5];
+  string ret;
+  ret.reserve((int)(str.size()*2.2));
+
+  for(string::size_type n=0;n<str.size();++n) {
+    snprintf(tmp, sizeof(tmp), "%02x ", (unsigned char)str[n]);
+    ret+=tmp;
+  }
+  return ret;
+}
+
+string makeHexDump(const basic_string<uint8_t>& str)
 {
   char tmp[5];
   string ret;
@@ -356,3 +395,46 @@ void unixDie(const std::string& reason)
 {
   throw std::runtime_error(reason+": "+strerror(errno));
 }
+
+time_t parseTime(std::string_view in)
+{
+  time_t now=time(0);
+
+  vector<string> formats({"%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S", "%Y%m%d %H%M", "%H:%M", "%H%M"});
+  for(const auto& f : formats) {
+    struct tm tm;
+    memset(&tm, 0, sizeof(tm));
+
+    localtime_r(&now, &tm);
+    tm.tm_isdst = -1;
+    tm.tm_sec = 0;
+    char* res = strptime(&in[0], f.c_str(), &tm);
+    if(res && !*res) {
+      //      cerr<<"Matched on "<<f<<endl;
+      return mktime(&tm);
+    }
+  }
+
+  string err="Can only parse on";
+  for(const auto& f : formats)
+    err += " '"+ f+"'";
+  throw runtime_error(err);
+}
+
+
+std::string string_replace(const std::string& str, const std::string& match, 
+        const std::string& replacement, unsigned int max_replacements)
+{
+    size_t pos = 0;
+    std::string newstr = str;
+    unsigned int replacements = 0;
+    while ((pos = newstr.find(match, pos)) != std::string::npos
+            && replacements < max_replacements)
+    {
+         newstr.replace(pos, match.length(), replacement);
+         pos += replacement.length();
+         replacements++;
+    }
+    return newstr;
+}
+

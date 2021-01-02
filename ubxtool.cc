@@ -496,13 +496,13 @@ struct TIMEGPS
 // ubxtool device srcid
 int main(int argc, char** argv)
 {
-  time_t starttime=time(0);
+  auto starttime = std::chrono::steady_clock::now();
   GOOGLE_PROTOBUF_VERIFY_VERSION;
 
   CLI::App app(program);
     
 
-  bool doGPS{true}, doGalileo{true}, doGlonass{false}, doBeidou{true}, doReset{false}, doWait{true}, doRTSCTS{true}, doSBAS{false};
+  bool doGPS{true}, doGalileo{true}, doGlonass{false}, doBeidou{false}, doReset{false}, doWait{true}, doRTSCTS{true}, doSBAS{false};
   bool doFakeFix{false};
   bool doKeepNMEA{false};
   bool doSTDOUT=false;
@@ -999,7 +999,7 @@ int main(int argc, char** argv)
         enableUBXMessageOnPort(fd, 0x02, 0x59, ubxport); // UBX-RXM-RLM
       }
 
-      if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-MON-HW"<<endl; } // SAR
+      if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-MON-HW"<<endl; } 
       enableUBXMessageOnPort(fd, 0x0A, 0x09, ubxport, 16); // UBX-MON-HW
 
       
@@ -1012,8 +1012,10 @@ int main(int argc, char** argv)
         enableUBXMessageOnPort(fd, 0x0d, 0x04, ubxport, 2);       
       }
 
-      if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-RXM-RAWX"<<endl; } // RF doppler
-      enableUBXMessageOnPort(fd, 0x02, 0x15, ubxport, 8); // RXM-RAWX
+      if(mods.find("NEO-M9N") == string::npos) {
+        if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-RXM-RAWX"<<endl; } // RF doppler
+        enableUBXMessageOnPort(fd, 0x02, 0x15, ubxport, 8); // RXM-RAWX
+      }
 
       if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling UBX-NAV-CLOCK"<<endl; } // clock details
       enableUBXMessageOnPort(fd, 0x01, 0x22, ubxport, 16); // UBX-NAV-CLOCK
@@ -1027,9 +1029,11 @@ int main(int argc, char** argv)
 	
         if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling/disabling UBX-NAV-TIMEBDS"<<endl; } // Beidou time solution
         enableUBXMessageOnPort(fd, 0x01, 0x24, ubxport, doBeidou ? 16 : 0); // UBX-NAV-TIMEBDS
-	
-        if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling/disabling UBX-NAV-TIMEGAL"<<endl; } // Galileo time solution
-        enableUBXMessageOnPort(fd, 0x01, 0x25, ubxport, doGalileo ? 16 : 0); // UBX-NAV-TIMEGAL
+
+        if(mods.find("NEO-M8P") ==string::npos) { 
+          if (doDEBUG) { cerr<<humanTimeNow()<<" Enabling/disabling UBX-NAV-TIMEGAL"<<endl; } // Galileo time solution
+          enableUBXMessageOnPort(fd, 0x01, 0x25, ubxport, doGalileo ? 16 : 0); // UBX-NAV-TIMEGAL
+        }
       }
             
       if(!version9 && !m8t && !fuzzPositionMeters) {
@@ -1453,7 +1457,8 @@ int main(int argc, char** argv)
             ns.emitNMM( nmm);            
           }
           else if(id.first ==2) { // GALILEO
-            auto inav = getInavFromSFRBXMsg(payload);
+            basic_string<uint8_t> reserved1, reserved2, sar, spare, crc;
+            auto inav = getInavFromSFRBXMsg(payload, reserved1, reserved2, sar, spare, crc);  
             unsigned int wtype = getbitu(&inav[0], 0, 6);
 
             uint32_t satTOW;
@@ -1534,6 +1539,11 @@ int main(int argc, char** argv)
             nmm.mutable_gi()->set_gnsssv(id.second);
             nmm.mutable_gi()->set_sigid(sigid);
             nmm.mutable_gi()->set_contents((const char*)&inav[0], inav.size());
+            nmm.mutable_gi()->set_reserved1((const char*)&reserved1[0], reserved1.size());
+            nmm.mutable_gi()->set_reserved2((const char*)&reserved2[0], reserved2.size());
+            nmm.mutable_gi()->set_sar((const char*)    &sar[0],   sar.size());
+            nmm.mutable_gi()->set_crc((const char*)    &crc[0],   crc.size());
+            nmm.mutable_gi()->set_spare((const char*)&spare[0], spare.size());
             
             ns.emitNMM( nmm);
           }
@@ -1765,7 +1775,7 @@ int main(int argc, char** argv)
         nmm.mutable_od()->set_owner(owner);
         nmm.mutable_od()->set_remark(remark);
         nmm.mutable_od()->set_recvgithash(g_gitHash);
-        nmm.mutable_od()->set_uptime(time(0) - starttime);
+        nmm.mutable_od()->set_uptime(std::chrono::duration_cast<std::chrono::seconds>(std::chrono::steady_clock::now()-starttime).count());
         
         
         ns.emitNMM( nmm);

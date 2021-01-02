@@ -14,7 +14,7 @@ function maketable(str, arr)
         enter().
         append("tr");
     
-    var columns = ["sv", "best-tle", "iod", "eph-age-m", "latest-disco", "time-disco", "sisa", "health", "alma-dist", "delta-utc", "sources", "db", "rtcm-eph-delta-cm","rtcm-clock-dclock0", "prres", "elev", "last-seen-s"];    
+    var columns = ["sv", "best-tle", "iod", "eph-age-m", "latest-disco", "time-disco", "sisa", "health", "alma-dist", "osnma", "sources", "db", "rtcm-eph-delta-cm","rtcm-clock-dclock0", "prres", "elev", "last-seen-s"];    
     
     // append the header row
     thead.append("tr")
@@ -130,6 +130,13 @@ function maketable(str, arr)
                 else if(column == "norad") {
                     ret.value = row["best-tle-norad"];
                 }
+                else if(column == "osnma" && row["osnma"] != null) {
+                    if(row["osnma"]==true)
+                        ret.value="ON!";
+                    else
+                        ret.value="off";
+                }
+
                 else if(column == "delta-utc" && row["delta-utc"] != null) {
                     ret.value = row["delta-utc"]+'<span class="CellComment">a0: '+row["a0"]+'<br/>a1: '+row["a1"]+'<br/>wn0t: ' + row["wn0t"]+'<br/>t0t: '+row["t0t"]+'</span>';
                     ret.Class = 'CellWithComment';
@@ -287,6 +294,8 @@ function updateSats()
         {
             let wantIt = false;
             if(d3.select("#GalE1").property("checked") && arr[n].gnssid==2 && arr[n].sigid == 1)
+                wantIt = true;
+            if(d3.select("#GalE5a").property("checked") && arr[n].gnssid==2 && arr[n].sigid == 6)
                 wantIt = true;
             if(d3.select("#GalE5b").property("checked") && arr[n].gnssid==2 && arr[n].sigid == 5)
                 wantIt = true;
