@@ -72,8 +72,8 @@ Goals:
 
 Works on Linux (including Raspbian Buster on Pi Zero W), OSX and OpenBSD.
 
-Build locally
--------------
+Build locally (Linux, Debian, Ubuntu)
+-------------------------------------
 
 To get started, make sure you have a C++17 compiler (like g++ 8 or higher),
 git, protobuf-compiler.  Then run 'make ubxtool navdump' to build the
@@ -94,6 +94,22 @@ library installed. If you get an error about 'wslay', do the following, and run 
 
 ```
 echo WSLAY=-lwslay > Makefile.local
+```
+
+Building on OSX
+---------------
+With thanks to a contributor from Prague.  First make sure you've installed
+brew, which you can get [here](https://brew.sh/). Then do:
+
+```
+brew install protobuf lzlib zstd h2o eigen
+```
+
+And then:
+```
+git clone https://github.com/ahupowerdns/galmon.git --recursive
+cd galmon
+make
 ```
 
 Running in Docker
