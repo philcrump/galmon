@@ -37,7 +37,7 @@
 #include "gpscnav.hh"
 #include "rtcm.hh"
 #include "version.hh"
-
+//#include "nequick.hh"
 
 static char program[]="navparse";
 
@@ -263,9 +263,6 @@ void SVStat::reportNewEphemeris(const SatID& id, InfluxPusher& idb)
   if(gnss==0) { // GPS
     const auto& eg = ephgpsmsg;
 
-    idb.addValue(id, "ephemeris-actual", {
-        {"iod", eg.getIOD()}}, satUTCTime(id));
-    
     
     idb.addValue(id, "ephemeris-actual", {
         {"iod", eg.getIOD()}, 
@@ -564,6 +561,25 @@ try {
     }
     sats.push_back(sat);
   }
+
+  vector<SatID> aux{{2, 14, 1}, {2,18,1}};
+  for(const auto& id : aux) {
+    if(!g_svstats.count(id))
+      continue;
+    
+    const auto& svstat = g_svstats[id];
+
+    if(svstat.completeIOD() && svstat.galmsg.sisa == 255) {
+      continue;
+    }
+    if(svstat.galmsg.e1bhs || svstat.galmsg.e1bdvs) {
+      continue;
+    }
+    Point sat;
+    getCoordinates(tow, svstat.galmsg, &sat);
+    sats.push_back(sat);
+  }
+  
   //  cout<<endl;
   auto cov = emitCoverage(sats);
   int cells=0;
@@ -1521,6 +1537,9 @@ try
             }
           }
           if(s.first.gnss == 2) {
+            if(s.second.osnmaTime >= 0 && ephAge(s.second.galmsg.tow, s.second.osnmaTime) < 60)
+              item["osnma"] = s.second.osnma;
+            
             auto galileoalma = g_galileoalmakeeper.get();
             if(auto iter = galileoalma.find(s.first.sv); iter != galileoalma.end()) {
               Point almapos;
@@ -1833,7 +1852,7 @@ try
       if(!lastCovSyncPoint)
         holdOffTime = nmm.localutcseconds() + 600;
       
-      if(nmm.localutcseconds() > holdOffTime)
+      if((time_t)nmm.localutcseconds() > holdOffTime)
         storeCoverageStats(idb, nmm.localutcseconds());
       lastCovSyncPoint = nmm.localutcseconds() / lastCovInterval;
     }
@@ -1844,6 +1863,63 @@ try
       storeSelfStats(idb, nmm.localutcseconds());
       lastSelfstatSyncPoint = nmm.localutcseconds() / lastSelfstatInterval;
     }
+
+    #if 0
+    constexpr auto lastIonoInterval = 3600;
+    static time_t lastIonoSyncPoint;
+    if(nmm.localutcseconds() / lastIonoInterval > (unsigned int)lastIonoSyncPoint) {
+      // go over all satellites
+      NeQuickInst nqi;
+      //      cerr<<"Looking at all sats"<<endl;
+      for(const auto& s : g_svstats) {
+        if(s.first.gnss!=2 || !s.second.completeIOD())
+          continue;
+        Point sat;
+        s.second.getCoordinates(s.second.tow(), &sat);
+        for(const auto& pr : s.second.perrecv) {
+          //          cerr<<"Looking at "<<s.first.sv<<", "<<pr.second.db<<" "<<nmm.localutcseconds()<<", "<<pr.second.t<<" perrecv "<<pr.first<<" count " << g_srcpos.count(pr.first)<<endl;
+          if(g_srcpos.count(pr.first) && (pr.second.db > 0 || (nmm.localutcseconds() - pr.second.t < 120))) {
+            //            cerr<<"Doing it -> "<< s.second.galmsg.ai0 <<" " <<s.second.galmsg.ai1<<" " << s.second.galmsg.ai2<< endl;
+            const auto& sp = g_srcpos[pr.first];
+            try {
+              //              cerr<<"Obs "<<pr.first<<" pos: "<<sp.pos.x<<", "<<sp.pos.y<<", "<<sp.pos.z<<endl;
+              //              cerr<<"Sat " <<s.first.sv<<" pos: "<<sat.x<<", "<<sat.y<<", "<<sat.z<<endl;
+              //              auto obs = ecefToWGS84Deg(sp.pos.x, sp.pos.y, sp.pos.z);
+              //              cerr<<"Observer height: "<<get<2>(obs)<<" meters, long "<<get<0>(obs)<<", lat "<<get<1>(obs)<<endl;
+
+              //              auto satdegs = ecefToWGS84Deg(sat.x, sat.y, sat.z);
+              //              cerr<<"Satellite height: "<<get<2>(satdegs)<<" meters, long "<<get<0>(satdegs)<<", lat "<<get<1>(satdegs)<< " -> elevation "<<getElevationDeg(sat, sp.pos)<<" deg"<<endl;
+
+              if(getElevationDeg(sat, sp.pos) < 0) // below the horizon
+                continue;
+              
+              if(sp.pos.x==0 || isnan(sat.x)) {
+                //                cerr<<"Fake position, skipping"<<endl;
+                continue;
+              }
+              double meters = (40.3e16/(1575420000.0*1575420000.0)) *
+                nqi.getTecu(nmm.localutcseconds(),
+                            s.second.galmsg.ai0,
+                            s.second.galmsg.ai1,
+                            s.second.galmsg.ai2, sp.pos, sat);
+              
+              idb.addValue(s.first, "nequick",
+                           {
+                           {"meters", meters}
+                           }, nmm.localutcseconds() + nmm.localutcnanoseconds()/1000000000.0, pr.first);
+              //              cerr<<"Meters: "<<meters<<endl;
+            }
+            catch(std::exception& e) {
+              cerr<<"Exception during NeQuick: "<<e.what()<<endl;
+            }
+
+          }
+        }
+      }
+      //      cerr<<"Done"<<endl;
+      lastIonoSyncPoint = nmm.localutcseconds() / lastIonoInterval;
+    }
+#endif
     
     
     if(nmm.type() == NavMonMessage::ReceptionDataType) {
@@ -1874,12 +1950,12 @@ try
       
       Point sat{0,0,0};
       //cout<<"Got recdata for "<<id.gnss<<","<<id.sv<<","<<id.sigid<<": count="<<g_svstats.count(id)<<endl;
-      if(g_svstats[id].completeIOD() && (id.gnss != 6 || !(random() % 16))) { // glonass is too slow
+      if(g_svstats[id].completeIOD() && !(random() % 16)) { 
         g_svstats[id].getCoordinates(g_svstats[id].tow(), &sat);
       }
       
       if(sat.x != 0 && g_srcpos[nmm.sourceid()].pos.x != 0) {
-        if(doLogRFData && !(random() % 4))
+        if(doLogRFData && !(random() % 16))
         idb.addValue(id, "recdata",
                      {
                      {"db", nmm.rd().db()},
@@ -1909,7 +1985,6 @@ try
       auto& gm = svstat.galmsg;
       unsigned int wtype = gm.parse(inav);
 
-      
       if(wtype == 5 && svstat.galmsgTyped.count(5)) {
         const auto& old5gm = svstat.galmsgTyped[5];
         if(make_tuple(old5gm.e5bhs, old5gm.e1bhs, old5gm.e5bdvs, old5gm.e1bdvs) !=
@@ -1921,6 +1996,15 @@ try
       svstat.galmsgTyped[wtype] = gm;
 
       if(wtype == 1 || wtype == 2 || wtype == 3 || wtype == 4) {
+        if(nmm.gi().has_reserved1()) {
+          static string off;
+          if(off.empty())
+            off.append(5, (char)0);
+          svstat.osnma = nmm.gi().reserved1() != off;
+          if(svstat.osnma) // eventually this will become too much but ok for now
+            idb.addValue(id, "osnma", {{"wtype", wtype}, {"field", makeHexDump(nmm.gi().reserved1())}}, satUTCTime(id));
+          svstat.osnmaTime = gm.tow;
+        }
         idb.addValue(id, "ephemeris", {{"iod-live", svstat.galmsg.iodnav},
               {"eph-age", ephAge(gm.tow, gm.getT0e())}}, satUTCTime(id));
 
@@ -1940,18 +2024,18 @@ try
         }
       }
 
-      g_svstats[id].perrecv[nmm.sourceid()].t = nmm.localutcseconds();
+      svstat.perrecv[nmm.sourceid()].t = nmm.localutcseconds();
 
       if(wtype >=1 && wtype <= 4) { // ephemeris 
         if(wtype == 3) {
-          idb.addValue(id, "sisa", {{"value", g_svstats[id].galmsg.sisa}}, satUTCTime(id));
+          idb.addValue(id, "sisa", {{"value", svstat.galmsg.sisa}}, satUTCTime(id));
         }
         else if(wtype == 4) {
           idb.addValue(id, "clock", {{"offset_ns", svstat.galmsg.getAtomicOffset(svstat.tow()).first}, 
-                  {"t0c", g_svstats[id].galmsg.t0c*60}, // getT0c()??
-                {"af0", g_svstats[id].galmsg.af0},
-                  {"af1", g_svstats[id].galmsg.af1},
-                    {"af2", g_svstats[id].galmsg.af2}}, satUTCTime(id)); 
+                  {"t0c", svstat.galmsg.t0c*60}, // getT0c()??
+                {"af0", svstat.galmsg.af0},
+                  {"af1", svstat.galmsg.af1},
+                    {"af2", svstat.galmsg.af2}}, satUTCTime(id)); 
 
 
             if(oldgm.af0 && oldgm.t0c != svstat.galmsg.t0c) {
@@ -1977,29 +2061,29 @@ try
         }
         else if(wtype == 5) {
           idb.addValue(id, "iono", {
-              {"ai0", g_svstats[id].galmsg.ai0},
-                {"ai1", g_svstats[id].galmsg.ai1},
-                  {"ai2", g_svstats[id].galmsg.ai2},
-                    {"sf1", g_svstats[id].galmsg.sf1},
-                      {"sf2", g_svstats[id].galmsg.sf2},
-                        {"sf3", g_svstats[id].galmsg.sf3},
-                          {"sf4", g_svstats[id].galmsg.sf4},
-                            {"sf5", g_svstats[id].galmsg.sf5}}, satUTCTime(id));
+              {"ai0", svstat.galmsg.ai0},
+                {"ai1", svstat.galmsg.ai1},
+                  {"ai2", svstat.galmsg.ai2},
+                    {"sf1", svstat.galmsg.sf1},
+                      {"sf2", svstat.galmsg.sf2},
+                        {"sf3", svstat.galmsg.sf3},
+                          {"sf4", svstat.galmsg.sf4},
+                            {"sf5", svstat.galmsg.sf5}}, satUTCTime(id));
 
           
           idb.addValue(id, "galbgd", {
-              {"BGDE1E5a", g_svstats[id].galmsg.BGDE1E5a},
-                {"BGDE1E5b", g_svstats[id].galmsg.BGDE1E5b}}, satUTCTime(id));
+              {"BGDE1E5a", svstat.galmsg.BGDE1E5a},
+                {"BGDE1E5b", svstat.galmsg.BGDE1E5b}}, satUTCTime(id));
 
           
           idb.addValue(id, "galhealth", {
-              {"e1bhs", g_svstats[id].galmsg.e1bhs}, 
-                {"e5bhs", g_svstats[id].galmsg.e5bhs},
-                  {"e5bdvs", g_svstats[id].galmsg.e5bdvs},
-                    {"e1bdvs", g_svstats[id].galmsg.e1bdvs}}, satUTCTime(id));
+              {"e1bhs", svstat.galmsg.e1bhs}, 
+                {"e5bhs", svstat.galmsg.e5bhs},
+                  {"e5bdvs", svstat.galmsg.e5bdvs},
+                    {"e1bdvs", svstat.galmsg.e1bdvs}}, satUTCTime(id));
         }
         else if(wtype == 6) {  // GST-UTC
-          const auto& sv = g_svstats[id];
+          const auto& sv = svstat;
           g_GSTUTCOffset = sv.galmsg.getUTCOffset(sv.tow(), sv.wn()).first;
           idb.addValue(id, "utcoffset", {
               {"a0", sv.galmsg.a0},
@@ -2038,16 +2122,19 @@ try
             g_galileoalma[gm.alma3.svid] = gm.alma3;
           }
           g_GSTGPSOffset = gm.getGPSOffset(gm.tow, gm.wn).first;
-          idb.addValue(id, "gpsoffset", {{"a0g", g_svstats[id].galmsg.a0g},
-                {"a1g", g_svstats[id].galmsg.a1g},
-                  {"t0g", g_svstats[id].galmsg.t0g},
-                    {"wn0g", g_svstats[id].galmsg.wn0g},
+          idb.addValue(id, "gpsoffset", {{"a0g", svstat.galmsg.a0g},
+                {"a1g", svstat.galmsg.a1g},
+                  {"t0g", svstat.galmsg.t0g},
+                    {"wn0g", svstat.galmsg.wn0g},
                       {"delta", g_GSTGPSOffset}
             }, satUTCTime(id));
           
         }
     }
     else if(nmm.type() == NavMonMessage::GalileoCnavType) {
+      SatID id={2,(uint32_t) nmm.gc().gnsssv(), 8}; // E6
+      idb.addValue(id, "galcnav", {{"msg", makeHexDump(nmm.gc().contents())}},
+                   nmm.localutcseconds());
       // ... no idea what this contains
     }
     else if(nmm.type() == NavMonMessage::GalileoFnavType) {
@@ -2077,46 +2164,51 @@ try
         idb.addValue(id, "ephemeris", {{"iod-live", svstat.galmsg.iodnav},
               {"eph-age", ephAge(gm.tow, gm.getT0e())}}, satUTCTime(id));
 
-        int w = 2;
+        int w = 1;
         for(; w < 5; ++w) {
           if(!svstat.galmsgTyped.count(w))
             break;
-          if(w > 2 && svstat.galmsgTyped[w-1].iodnav != svstat.galmsgTyped[w].iodnav)
+          if(w > 1 && svstat.galmsgTyped[w-1].iodnav != svstat.galmsgTyped[w].iodnav)
             break;
         }
         if(w==5) { // have complete new ephemeris
 
           if(svstat.ephgalmsg.iodnav != svstat.galmsgTyped[2].iodnav) {
-            cout<<"New F/NAV ephemeris for "<<makeSatIDName(id)<<" iod " << svstat.galmsgTyped[2].iodnav << " t0e " << svstat.galmsgTyped[3].t0e <<endl;
+            //            cout<<"New F/NAV ephemeris for "<<makeSatIDName(id)<<" iod " << svstat.galmsgTyped[1].iodnav << " t0e " << svstat.galmsgTyped[3].t0e << " af0 "<< gm.af0 <<" iod1 "<<svstat.galmsgTyped[1].iodnav;
+            /*
+            cout<<" iod2 "<<svstat.galmsgTyped[2].iodnav;
+            cout<<" iod3 "<<svstat.galmsgTyped[3].iodnav;
+            cout<<" iod4 "<<svstat.galmsgTyped[4].iodnav << endl;
+            */
             svstat.oldephgalmsg = svstat.ephgalmsg;
-            svstat.ephgalmsg = svstat.galmsgTyped[wtype];
+            svstat.ephgalmsg = svstat.galmsg;
             svstat.reportNewEphemeris(id, idb);
           }
         }
       }
 
-      g_svstats[id].perrecv[nmm.sourceid()].t = nmm.localutcseconds();
+      svstat.perrecv[nmm.sourceid()].t = nmm.localutcseconds();
 
       if(wtype >=1 && wtype <= 4) { // ephemeris 
         if(wtype == 1) {
-          idb.addValue(id, "sisa", {{"value", g_svstats[id].galmsg.sisa}}, satUTCTime(id));
+          idb.addValue(id, "sisa", {{"value", svstat.galmsg.sisa}}, satUTCTime(id));
 
           idb.addValue(id, "galbgd", {
-              {"BGDE1E5a", g_svstats[id].galmsg.BGDE1E5a},
+              {"BGDE1E5a", svstat.galmsg.BGDE1E5a},
                 }, satUTCTime(id));
           
           
           idb.addValue(id, "galhealth", {
-                {"e5ahs", g_svstats[id].galmsg.e5bhs},
-                  {"e5advs", g_svstats[id].galmsg.e5bdvs}
+                {"e5ahs", svstat.galmsg.e5bhs},
+                  {"e5advs", svstat.galmsg.e5bdvs}
                     }, satUTCTime(id));
 
           
           idb.addValue(id, "clock", {{"offset_ns", svstat.galmsg.getAtomicOffset(svstat.tow()).first}, 
-                  {"t0c", g_svstats[id].galmsg.t0c*60}, // getT0c()??
-                {"af0", g_svstats[id].galmsg.af0},
-                  {"af1", g_svstats[id].galmsg.af1},
-                    {"af2", g_svstats[id].galmsg.af2}}, satUTCTime(id)); 
+                  {"t0c", svstat.galmsg.t0c*60}, // getT0c()??
+                {"af0", svstat.galmsg.af0},
+                  {"af1", svstat.galmsg.af1},
+                    {"af2", svstat.galmsg.af2}}, satUTCTime(id)); 
        
           if(oldgm.af0 && oldgm.t0c != svstat.galmsg.t0c) {
             auto oldOffset = oldgm.getAtomicOffset(svstat.tow());
@@ -2139,14 +2231,14 @@ try
           }
 
           idb.addValue(id, "iono", {
-              {"ai0", g_svstats[id].galmsg.ai0},
-                {"ai1", g_svstats[id].galmsg.ai1},
-                  {"ai2", g_svstats[id].galmsg.ai2},
-                    {"sf1", g_svstats[id].galmsg.sf1},
-                      {"sf2", g_svstats[id].galmsg.sf2},
-                        {"sf3", g_svstats[id].galmsg.sf3},
-                          {"sf4", g_svstats[id].galmsg.sf4},
-                            {"sf5", g_svstats[id].galmsg.sf5}}, satUTCTime(id));
+              {"ai0", svstat.galmsg.ai0},
+                {"ai1", svstat.galmsg.ai1},
+                  {"ai2", svstat.galmsg.ai2},
+                    {"sf1", svstat.galmsg.sf1},
+                      {"sf2", svstat.galmsg.sf2},
+                        {"sf3", svstat.galmsg.sf3},
+                          {"sf4", svstat.galmsg.sf4},
+                            {"sf5", svstat.galmsg.sf5}}, satUTCTime(id));
           
         }
       }
@@ -2163,10 +2255,10 @@ try
           
         g_dtLS = sv.galmsg.dtLS;
         g_GSTGPSOffset = gm.getGPSOffset(gm.tow, gm.wn).first;
-        idb.addValue(id, "gpsoffset", {{"a0g", g_svstats[id].galmsg.a0g},
-              {"a1g", g_svstats[id].galmsg.a1g},
-                {"t0g", g_svstats[id].galmsg.t0g},
-                  {"wn0g", g_svstats[id].galmsg.wn0g},
+        idb.addValue(id, "gpsoffset", {{"a0g", svstat.galmsg.a0g},
+              {"a1g", svstat.galmsg.a1g},
+                {"t0g", svstat.galmsg.t0g},
+                  {"wn0g", svstat.galmsg.wn0g},
                     {"delta", g_GSTGPSOffset}
           }, satUTCTime(id));
       }
@@ -2583,6 +2675,14 @@ try
           
         }
       }
+      else if(rm.type == 1059 || rm.type == 1242) {
+        for(const auto& dcb : rm.d_dcbs) {
+          idb.addValue(dcb.first, "rtcm-dcb", {
+              {"value", dcb.second}},
+            nmm.localutcseconds(),
+            nmm.sourceid());
+        }
+      }
       else if(rm.type == 1060 || rm.type == 1243) {
         for(const auto& ed : rm.d_ephs) {
           auto iter = g_svstats.find(ed.id);
@@ -2620,7 +2720,7 @@ try
           id.sv = rm.d_sv;
           id.sigid = 6; // seems reasonable for E5a
 
-          static map<pair<int, int>, int> lastT0e;
+          static map<pair<int, int>, unsigned int> lastT0e;
 
           pair<int, int> key(nmm.sourceid(), rm.d_sv);
           if(!lastT0e.count(key) || lastT0e[key] != eg.t0e) {
@@ -2693,8 +2793,8 @@ try
       
     }
     else if(nmm.type()== NavMonMessage::BeidouInavTypeD1) {
-      //      if(doGalileoReportSpeedup)
-      //  continue; // speedup
+      if(doGalileoReportSpeedup)
+        continue; // speedup
             
     try {
       SatID id{nmm.bid1().gnssid(), nmm.bid1().gnsssv(), nmm.bid1().sigid()};
@@ -2730,7 +2830,7 @@ try
           auto newOffset = bm.getAtomicOffset(bm.sow);
           svstat.timeDisco = oldOffset.first - newOffset.first;
           if(fabs(svstat.timeDisco) < 10000)
-            idb.addValue(id, "clock_jump_ns", {{"value", svstat.timeDisco}}, satUTCTime(id));
+            idb.addValue(id, "clock_jump_ns", {{"jump", svstat.timeDisco}}, satUTCTime(id));
         }
         svstat.lastBeidouMessage1 = bm;        
       }
@@ -2794,8 +2894,8 @@ try
       */
     }
     else if(nmm.type()== NavMonMessage::GlonassInavType) {
-      //      if(doGalileoReportSpeedup)
-      //  continue; // speedup
+      if(doGalileoReportSpeedup)
+        continue; // speedup
 
       SatID id{nmm.gloi().gnssid(), nmm.gloi().gnsssv(), nmm.gloi().sigid()};
       auto& svstat = g_svstats[id];
@@ -2828,7 +2928,7 @@ try
           if(oldgm.taun && oldgm.taun != gm.taun) {
             if(gm.getGloTime() - oldgm.getGloTime()  < 300) {
               svstat.timeDisco = gm.getTaunNS() - oldgm.getTaunNS();
-              idb.addValue(id, "clock_jump_ns", {{"value", svstat.timeDisco}}, satUTCTime(id));
+              idb.addValue(id, "clock_jump_ns", {{"jump", svstat.timeDisco}}, satUTCTime(id));
             }
           }
         }

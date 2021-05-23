@@ -258,11 +258,15 @@ try
   bool doRFData{true};
   bool doObserverPosition{false};
   bool doVERSION{false};
+  string rinexfname;
+  string osnmafname;
   app.add_option("--svs", svpairs, "Listen to specified svs. '0' = gps, '2' = Galileo, '2,1' is E01");
   app.add_option("--stations", stations, "Listen to specified stations.");
   app.add_option("--positions,-p", doObserverPosition, "Print out observer positions (or not)");
   app.add_option("--rfdata,-r", doRFData, "Print out RF data (or not)");
   app.add_option("--recdata", doReceptionData, "Print out reception data (or not)");
+  app.add_option("--rinex", rinexfname, "If set, emit ephemerides to this filename");
+  app.add_option("--osnma", osnmafname, "If set, emit OSNMA CSV to this filename");
   app.add_flag("--version", doVERSION, "show program version and copyright");
     
   try {
@@ -299,7 +303,18 @@ try
 
   sp3csv<<"timestamp gnssid sv ephAge sp3X sp3Y sp3Z ephX ephY ephZ  sp3Clock ephClock distance along clockDelta E speed"<<endl;
 
-  //  RINEXNavWriter rnw("test.rnx");
+  std::optional<RINEXNavWriter> rnw;
+
+  if(!rinexfname.empty())
+    rnw = RINEXNavWriter(rinexfname);
+
+  std::optional<ofstream> osnmacsv;
+  if(!osnmafname.empty()) {
+    osnmacsv = ofstream(osnmafname);
+    (*osnmacsv)<<"wn,tow,wtype,sv,osnma\n";
+
+  }
+  
   for(;;) {
     char bert[4];
     int res = readn2(0, bert, 4);
@@ -388,13 +403,17 @@ try
       int wtype = gm.parse(inav);
       
       gm.tow = nmm.gi().gnsstow();
+      bool isnew = gmwtypes[{nmm.gi().gnsssv(), wtype}].tow != gm.tow;
       gmwtypes[{nmm.gi().gnsssv(), wtype}] = gm;
       static map<int,GalileoMessage> oldEph;
       cout << "gal inav wtype "<<wtype<<" for "<<nmm.gi().gnssid()<<","<<nmm.gi().gnsssv()<<","<<nmm.gi().sigid()<<" pbwn "<<nmm.gi().gnsswn()<<" pbtow "<< nmm.gi().gnsstow();
       static uint32_t tow;
       if(wtype >=1 && wtype <= 5) {
-        if(nmm.gi().has_reserved1())
+        if(nmm.gi().has_reserved1()) {
           cout<<" res1 "<<makeHexDump(nmm.gi().reserved1());
+	  if(osnmacsv && isnew)
+	    (*osnmacsv)<<nmm.gi().gnsswn()<<","<<gm.tow<<","<<wtype<<","<<nmm.gi().gnsssv()<<","<<makeHexDump(nmm.gi().reserved1())<<endl;
+	}
       }
       if(wtype == 4) {
         //              2^-34       2^-46
@@ -457,7 +476,9 @@ try
           if(!oldEph[sv].sqrtA)
             oldEph[sv] = gm;
           else if(oldEph[sv].iodnav != gm.iodnav) {
-            //            rnw.emitEphemeris(sid, gm);
+	    if(rnw)
+	      rnw->emitEphemeris(sid, gm);
+	    //	    gm.toJSON();
 
             cout<<" disco! "<< oldEph[sv].iodnav << " - > "<<gm.iodnav <<", "<< (gm.getT0e() - oldEph[sv].getT0e())/3600.0 <<" hours-jump insta-age "<<ephAge(gm.tow, gm.getT0e())/3600.0<<" hours";
             Point oldPoint, newPoint;
@@ -551,12 +572,12 @@ try
       cout<<endl;      
     }
     else if(nmm.type() == NavMonMessage::GalileoCnavType) {
-      basic_string<uint8_t> cnav((uint8_t*)nmm.gf().contents().c_str(), nmm.gf().contents().size());
+      basic_string<uint8_t> cnav((uint8_t*)nmm.gc().contents().c_str(), nmm.gc().contents().size());
       int sv = nmm.gc().gnsssv();
       if(!svfilter.check(2, sv, nmm.gc().sigid()))
         continue;
       etstamp();
-      cout << "C/NAV for " << nmm.gf().gnssid()<<","<<nmm.gf().gnsssv()<<","<<nmm.gf().sigid() <<": "<< makeHexDump(cnav)<<endl;
+      cout << "C/NAV for " << nmm.gc().gnssid()<<","<<nmm.gc().gnsssv()<<","<<nmm.gc().sigid() <<": "<< makeHexDump(cnav)<<endl;
 
     }
     else if(nmm.type() == NavMonMessage::GalileoFnavType) {
@@ -766,6 +787,14 @@ try
         cout <<" iode " << rm.d_gm.iodnav << " sisa " << (unsigned int) rm.d_gm.sisa << " t0c " << rm.d_gm.t0c << " af0 "<<rm.d_gm.af0 <<" af1 " << rm.d_gm.af1 <<" af2 " << (int) rm.d_gm.af2 << " BGDE1E5a " << rm.d_gm.BGDE1E5a;
         if(rm.type == 1046) // I/NAV
           cout <<" BGDE1E5b "<< rm.d_gm.BGDE1E5b;
+        cout<<endl;
+      }
+      else if(rm.type == 1059 || rm.type==1242) {
+        cout<<"\n";
+        for(const auto& dcb : rm.d_dcbs) {
+          cout<<"   "<<makeSatIDName(dcb.first)<<":  "<<dcb.second<<" meters\n";
+        }
+
         cout<<endl;
       }
       else {
