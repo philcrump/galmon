@@ -1101,10 +1101,6 @@ try
       const auto& s= iter->second;
       // XXX CONVERSION
       /*
-      ret["a0"] = s.a0;
-      ret["a1"] = s.a1;
-      ret["a0g"] = s.a0g;
-      ret["a1g"] = s.a1g;
       */
       if(id.gnss == 2) {
         ret["sf1"] = s.galmsg.sf1;
@@ -1118,21 +1114,30 @@ try
         ret["e1bdvs"]=s.galmsg.e1bdvs;
         ret["e5bhs"]=s.galmsg.e5bhs;
         ret["e1bhs"]=s.galmsg.e1bhs;
+	ret["ai0"] = s.galmsg.ai0;
+	ret["ai1"] = s.galmsg.ai1;
+	ret["ai2"] = s.galmsg.ai2;
+	ret["dtLS"] = s.galmsg.dtLS;
+	ret["dtLSF"] = s.galmsg.dtLSF;
+	ret["wnLSF"] = s.galmsg.wnLSF;
+	ret["dn"] = s.galmsg.dn;
+	ret["a0"] = s.galmsg.a0;
+	ret["a1"] = s.galmsg.a1;
+	ret["a0g"] = s.galmsg.a0g;
+	ret["a1g"] = s.galmsg.a1g;
+	ret["t0c"] = s.galmsg.getT0c();
+	ret["af0"] = s.galmsg.af0;
+	ret["af1"] = s.galmsg.af1;
+	ret["af2"] = s.galmsg.af2;
+
       }
       // XXX CONVERSION
       /*
-      ret["ai0"] = s.ai0;
-      ret["ai1"] = s.ai1;
-      ret["ai2"] = s.ai2;
       */
       ret["wn"] = s.wn();
       ret["tow"] = s.tow();
       // XXX CONVERSION
       /*
-      ret["dtLS"] = s.dtLS;
-      ret["dtLSF"] = s.dtLSF;
-      ret["wnLSF"] = s.wnLSF;
-      ret["dn"] = s.dn;
       */
 
       if(id.gnss == 3 && svstats[id].ephBeidoumsg.sow >= 0 && svstats[id].ephBeidoumsg.sqrtA != 0) {
@@ -2632,7 +2637,7 @@ try
         for(const auto& ed : rm.d_ephs) {
           auto iter = g_svstats.find(ed.id);
           // XXX NAVCAST ONLY
-          if(iter != g_svstats.end() && iter->second.completeIOD()  && iter->second.liveIOD().getIOD() == ed.iod && nmm.sourceid()==300)
+          if(iter != g_svstats.end() && iter->second.completeIOD()  && iter->second.liveIOD().getIOD() == ed.iod && nmm.sourceid()==302)
             iter->second.rtcmEphDelta = ed;
           
           idb.addValue(ed.id, "rtcm-eph-correction", {
@@ -2658,7 +2663,7 @@ try
 
         for(const auto& cd : rm.d_clocks) {
           auto iter = g_svstats.find(cd.id);
-          if(iter != g_svstats.end() && nmm.sourceid()==300) /// XXX wrong
+          if(iter != g_svstats.end() && nmm.sourceid()==302) /// XXX wrong
             iter->second.rtcmClockDelta = cd;
 
           idb.addValue(cd.id, "rtcm-clock-correction", {
@@ -2686,7 +2691,7 @@ try
       else if(rm.type == 1060 || rm.type == 1243) {
         for(const auto& ed : rm.d_ephs) {
           auto iter = g_svstats.find(ed.id);
-          if(iter != g_svstats.end() && iter->second.completeIOD()  && iter->second.liveIOD().getIOD() == ed.iod && nmm.sourceid()==300)
+          if(iter != g_svstats.end() && iter->second.completeIOD()  && iter->second.liveIOD().getIOD() == ed.iod && nmm.sourceid()==302)
             iter->second.rtcmEphDelta = ed;
           
           idb.addValue(ed.id, "rtcm-eph-correction", {
@@ -2754,7 +2759,7 @@ try
 
       for(const auto& cd : rm.d_clocks) {
         auto iter = g_svstats.find(cd.id);
-        if(iter != g_svstats.end() && nmm.sourceid()==300)
+        if(iter != g_svstats.end() && nmm.sourceid()==302)
           iter->second.rtcmClockDelta = cd;
         
         idb.addValue(cd.id, "rtcm-clock-correction", {

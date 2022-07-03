@@ -133,9 +133,11 @@ try
   bool doVERSION{false}, doSTDOUT{false};
   CLI::App app(program);
   string sourceaddr;
+  bool quiet{false};
   app.add_option("--source", sourceaddr, "Connect to this IP address:port to source SBF (otherwise stdin)");
   app.add_option("--destination,-d", destinations, "Send output to this IPv4/v6 address");
   app.add_option("--station", g_srcid, "Station id")->required();
+  app.add_option("--quiet", quiet, "Don't emit noise");
   app.add_flag("--version", doVERSION, "show program version and copyright");
   app.add_flag("--stdout", doSTDOUT, "Emit output to stdout");
   try {
@@ -181,7 +183,8 @@ try
   for(;;) {
     double to=1000;
     auto res = getSEPMessage(srcfd, &to);
-    cerr<<res.first.getID()<<" - " <<res.first.getIDBare() << endl;
+    if(!quiet)
+      cerr<<res.first.getID()<<" - " <<res.first.getIDBare() << endl;
     if(res.first.getID() == 4023) { // I/NAV
       auto str = res.first.getPayload();
       struct SEPInav
@@ -392,10 +395,11 @@ try
         uint8_t src;
         uint8_t ign1;
         uint8_t rxChannel;
-        uint8_t navBits[48];
+        uint8_t navBits[64];
       } __attribute__((packed));
 
       SEPCnav sc;
+      
       auto str = res.first.getPayload();
       memcpy(&sc, str.c_str(), sizeof(sc));
       int sigid = sc.src & 31;
@@ -405,17 +409,32 @@ try
         continue;
       }
 
-      std::string cnav((char*)sc.navBits, 48);
+      std::string cnav((char*)sc.navBits, 64);
       // byte order adjustment
-      std::basic_string<uint8_t> payload;
+      std::basic_string<uint8_t> payload;    
       
-      for(unsigned int i = 0 ; i < 12; ++i) {
+      for(unsigned int i = 0 ; i < 16; ++i) {
         payload.append(1, sc.navBits[4 * i + 3]);
         payload.append(1, sc.navBits[4 * i + 2]);
         payload.append(1, sc.navBits[4 * i + 1]);
         payload.append(1, sc.navBits[4 * i + 0]);
       }
 
+      unsigned char crc_buff[58]={0};
+      unsigned int i;
+      for (i=0; i< 462;i++)
+	setbitu(crc_buff, 2+i, 1,getbitu(payload.c_str(),i, 1));
+
+      int calccrc=rtk_crc24q(crc_buff,58);
+      int realcrc= getbitu(payload.c_str(), 14+448, 24);
+      if (calccrc !=  realcrc) {
+	cerr << "CRC mismatch, " << calccrc << " != " << realcrc <<endl;
+      }
+      //      else
+      //	cerr<<"Checksum Correct: "<<calccrc << " = " << realcrc<<endl;
+
+      
+      
       NavMonMessage nmm;
       double t = utcFromGST(sc.wn - 1024, sc.towMsec / 1000.0);
       //      cerr<<t<< " " <<si.wn - 1024 <<" " <<si.towMsec /1000.0 <<" " << g_dtLS<<endl;
@@ -555,6 +574,7 @@ try
       
     }
     else {
+    if(!quiet)
       cerr<<"Unknown message "<<res.first.getID() << " / " <<res.first.getIDBare()<<"  ("<<res.first.d_store.size()<<" bytes)"<<endl;
     }
   }
