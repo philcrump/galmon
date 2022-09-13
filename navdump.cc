@@ -3,6 +3,7 @@
 #include <iostream>
 #include <arpa/inet.h>
 #include "fmt/format.h"
+#include "fmt/os.h"
 #include "fmt/printf.h"
 #include "CLI/CLI.hpp"
 #include <fstream>
@@ -32,6 +33,7 @@
 #include "gpscnav.hh"
 #include "rinex.hh"
 #include "rtcm.hh"
+#include "fixhunter.hh"
 
 static char program[]="navdump";
 
@@ -261,6 +263,7 @@ try
   bool doObserverDetails{false};
   bool doTimeOffsets{false};
   bool doVERSION{false};
+  bool doJammingData{false};
   string rinexfname;
   string osnmafname;
   app.add_option("--svs", svpairs, "Listen to specified svs. '0' = gps, '2' = Galileo, '2,1' is E01");
@@ -270,6 +273,7 @@ try
   app.add_option("--observerdetails,-o", doObserverDetails, "Print out observer detail data (or not)");
   app.add_option("--timeoffsets,-t", doTimeOffsets, "Print out timeoffset data (or not)");
   app.add_option("--recdata", doReceptionData, "Print out reception data (or not)");
+  app.add_option("--jamdata", doJammingData, "Print out jamming data (or not)");
   app.add_option("--rinex", rinexfname, "If set, emit ephemerides to this filename");
   app.add_option("--osnma", osnmafname, "If set, emit OSNMA CSV to this filename");
   app.add_flag("--version", doVERSION, "show program version and copyright");
@@ -386,6 +390,8 @@ try
       basic_string<uint8_t> inav((uint8_t*)nmm.gi().contents().c_str(), nmm.gi().contents().size());
       static map<int, GalileoMessage> gms;
       static map<pair<int, int>, GalileoMessage> gmwtypes;
+
+      static map<int, FixHunter> fixhunters;
       static map<int, GalileoMessage> oldgm4s;
       int sv = nmm.gi().gnsssv();
       if(!svfilter.check(2, sv, nmm.gi().sigid()))
@@ -406,12 +412,20 @@ try
       
       GalileoMessage& gm = gms[sv];
       int wtype = gm.parse(inav);
-      
-      gm.tow = nmm.gi().gnsstow();
+
+      if(wtype != 0 && wtype != 5 && wtype != 6)
+        gm.tow = nmm.gi().gnsstow();
       bool isnew = gmwtypes[{nmm.gi().gnsssv(), wtype}].tow != gm.tow;
       gmwtypes[{nmm.gi().gnsssv(), wtype}] = gm;
+
+      //      fixhunters[nmm.gi().gnsssv()].reportInav(inav,nmm.gi().gnsstow() );
+      
       static map<int,GalileoMessage> oldEph;
       cout << "gal inav wtype "<<wtype<<" for "<<nmm.gi().gnssid()<<","<<nmm.gi().gnsssv()<<","<<nmm.gi().sigid()<<" pbwn "<<nmm.gi().gnsswn()<<" pbtow "<< nmm.gi().gnsstow();
+      if(nmm.gi().has_ssp()) {
+        cout<<" ssp "<<(unsigned int) nmm.gi().ssp();
+      }
+
       static uint32_t tow;
 
       if(osnmacsv && isnew)
@@ -425,7 +439,7 @@ try
       }
       if(wtype == 4) {
         //              2^-34       2^-46
-        cout <<" iodnav "<<gm.iodnav <<" af0 "<<gm.af0 <<" af1 "<<gm.af1 <<", scaled: "<<ldexp(1.0*gm.af0, 19-34)<<", "<<ldexp(1.0*gm.af1, 38-46);
+        cout <<" iodnav "<<gm.iodnav <<" af0 "<<gm.af0 <<" af1 "<<gm.af1 <<", scaled: "<<1000000000.0*ldexp(1.0*gm.af0, 19-34)/(1<<19) <<" ns, "<<ldexp(1.0*gm.af1, 38-46);
         cout << " t0g " << gm.t0g <<" a0g " << gm.a0g <<" a1g " << gm.a1g <<" WN0g " << gm.wn0g;
 
         if(tow && oldgm4s.count(nmm.gi().gnsssv()) && oldgm4s[nmm.gi().gnsssv()].iodnav != gm.iodnav) {
@@ -433,7 +447,7 @@ try
           auto& oldgm4 = oldgm4s[nmm.gi().gnsssv()];
           auto oldOffset = oldgm4.getAtomicOffset(tow);
           auto newOffset = gm.getAtomicOffset(tow);
-          cout<<"  Timejump: "<<oldOffset.first - newOffset.first<<" after "<<(gm.getT0c() - oldgm4.getT0c() )<<" seconds";
+          cout<<"  Timejump: "<<oldOffset.first - newOffset.first<<" ns after "<<(gm.getT0c() - oldgm4.getT0c() )<<" seconds";
         }
 
         oldgm4s[nmm.gi().gnsssv()] = gm;
@@ -459,7 +473,7 @@ try
             if(!haveSeen.count({sv, bestSP3->t})) {
               haveSeen.insert({sv, bestSP3->t});
               Point newPoint;
-              double E=getCoordinates(gm.tow + (bestSP3->t - start), gm, &newPoint, false);
+              double E=getCoordinates(gm.tow + (bestSP3->t - start), gm, &newPoint);
               Point sp3Point(bestSP3->x, bestSP3->y, bestSP3->z);
               Vector dist(newPoint, sp3Point);
 
@@ -523,7 +537,7 @@ try
       }
       if(wtype == 0 || wtype == 5 || wtype == 6) {
         if(wtype != 0 || gm.sparetime == 2) {
-          cout << " tow "<< gm.tow;
+          cout << " tow "<< gm.tow << " (%30=" << (gm.tow%30)<<") ";
           tow = gm.tow;
         }
       }
@@ -533,7 +547,7 @@ try
       }
       if(wtype == 6) {
         cout<<" a0 " << gm.a0 <<" a1 " << gm.a1 <<" t0t "<<gm.t0t << " dtLS "<<(int)gm.dtLS;
-        cout <<" wnLSF "<< (unsigned int)gm.wnLSF<<" dn " << (unsigned int)gm.dn<< " dtLSF "<<(int)gm.dtLSF<<endl;
+        cout <<" wnLSF "<< (unsigned int)gm.wnLSF<<" dn " << (unsigned int)gm.dn<< " dtLSF "<<(int)gm.dtLSF;
       }
 
       
@@ -580,7 +594,100 @@ try
         int delta = dw*7*86400  + gm.tow - gm.getT0g(); // NOT ephemeris age tricks
         cout<<" wn%64 "<< (gm.wn%64) << " dw " << dw <<" delta " << delta;
       }
+      else if(wtype==16) {
+        // was -35
+        cout<<" redced af0red "<< 1000000000.0*ldexp(gm.af0red, -26)<<" ns, "<<3600.0*(1000000000.0/(1<<20))*ldexp(gm.af1red, -15)<<" ns/hour ("<<gm.af1red<<")";
+
+        int32_t t0r = 1+nmm.gi().gnsstow() - ((nmm.gi().gnsstow()-2)%30) -2;
+        cout<<" t0r "<<t0r<<" ";
+        //(30*((nmm.gi().gnsstow()-2)/30)+1) % 604800; // page 56 of the OSS ICD 2.0
+        REDCEDAdaptor rca(gm, t0r);
+#if 0        
+        static REDCEDAdaptor* orig=0;
+        if(!orig)
+          orig = new REDCEDAdaptor(gm, t0r);
+
+        static auto ofs = fmt::output_file("error.csv");
+        static auto redcedcsv = fmt::output_file("redced.csv");
+
+        static bool csvInit;
+        if(!csvInit) {
+          ofs.print("{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    "tow", "gnssid", "iod", "t0r", "red_x", "red_y", "red_z", "full_x", "full_y", "full_z", "redorig_x", "redorig_y", "redorig_z", "dist");
+          redcedcsv.print("gnssid,tow,t0r,deltaAred,exred,eyred,lambda0red,deltai0red,omega0red,af0red,af1red,nsec,fixedtow,x,y,z,radcor\n");
+          csvInit = true;
+        }
+
+        auto fixedtow = t0r + 300;
+        fixedtow -= (fixedtow % 200);
+                  
+        Point fixedredpoint;
+        getCoordinates(fixedtow, rca, &fixedredpoint);
+          
+          
+        redcedcsv.print("{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                        nmm.gi().gnsssv(),
+                        nmm.gi().gnsstow(),
+                        t0r,
+                        gm.deltaAred,
+                        gm.exred,
+                        gm.eyred,
+                        gm.lambda0red,
+                        gm.deltai0red,
+                        gm.omega0red,
+                        gm.af0red,
+                        gm.af1red,
+                        rca.getAtomicOffset(fixedtow).first,
+                        fixedtow,
+                        fixedredpoint.x, fixedredpoint.y, fixedredpoint.z,
+                        sqrt(fixedredpoint.x*fixedredpoint.x + fixedredpoint.y*fixedredpoint.y + fixedredpoint.z*fixedredpoint.z) - rca.getAtomicOffset(fixedtow).first/3.0
+                        );
+        redcedcsv.flush();
+
+#endif
+        cout<<"eyred "<<gm.eyred<<" exred "<<gm.exred<<"\nlambda0red in rad "<< ldexp(M_PI*gm.lambda0red, -22)<<" atan2 " <<atan2(1.0*gm.eyred, 1.0*gm.exred)<<" deltaAred "<<gm.deltaAred;
+        Point pointRed;
+        getCoordinates(nmm.gi().gnsstow(), rca, &pointRed);
+        cout<<" reduced coordinates: "<<pointRed;
+#if 0        
+        for(int letow = nmm.gi().gnsstow(); letow < nmm.gi().gnsstow() + 120; ++letow) {
       
+
+          getCoordinates(letow, *orig, &pointOrigRed);
+          cout<<"Reduced coordinates original CED: "<<pointOrigRed<<endl;
+          
+          getCoordinates(letow + gm.getAtomicOffset(letow).first/1000000000.0, gm, &point);
+          cout<<"Full coordinates:    "<<point<<endl;
+          
+          Vector dist(pointRed, point);
+
+          ofs.print("{},{},{},{},{},{},{},{},{},{},{},{},{},{}\n",
+                    letow,
+                    nmm.gi().gnsssv(),
+                    gm.iodnav,
+                    t0r,
+                    pointRed.x,
+                    pointRed.y,
+                    pointRed.z,
+                    point.x,
+                    point.y,
+                    point.z,
+                    pointOrigRed.x,
+                    pointOrigRed.y,
+                    pointOrigRed.z,
+
+                    dist.length());
+          auto ourpos=g_srcpos[nmm.sourceid()];
+          Vector range1(ourpos, pointRed), range2(ourpos, point);
+          
+          cout<<"Distance: "<<dist<<", length "<<dist.length()<<", range difference: "<<range1.length() - range2.length()<< " " <<ourpos<<endl;
+          
+        }
+#endif
+      }
+      else if(wtype>=17 && wtype <=20) {
+        cout<<" reed-solomon 2iod "<< (int) gm.rs2bitiod;
+      }
       cout<<endl;      
     }
     else if(nmm.type() == NavMonMessage::GalileoCnavType) {
@@ -692,7 +799,7 @@ try
           }
 
           int start = utcFromGPS(gpswn, (int)gs.tow);
-          cout<<"sp3 start: "<<start<<" wn " << gpswn<<" tow " << gs.tow << endl;
+          cout<<" sp3 start: "<<start<<" wn " << gpswn<<" tow " << gs.tow;
             
           SP3Entry e{0, sv, start};
           auto bestSP3 = lower_bound(g_sp3s.begin(), g_sp3s.end(), e, sp3Order);
@@ -1136,10 +1243,12 @@ try
       }
     }
     else if(nmm.type() == NavMonMessage::UbloxJammingStatsType) {
-      etstamp();
-      cout<<"noisePerMS "<<nmm.ujs().noiseperms() << " agcCnt "<<
-        nmm.ujs().agccnt()<<" flags "<<nmm.ujs().flags()<<" jamind "<<
-        nmm.ujs().jamind()<<endl;
+      if(doJammingData) {
+        etstamp();
+        cout<<"noisePerMS "<<nmm.ujs().noiseperms() << " agcCnt "<<
+          nmm.ujs().agccnt()<<" flags "<<nmm.ujs().flags()<<" jamind "<<
+          nmm.ujs().jamind()<<endl;
+      }
     }
     else if(nmm.type() == NavMonMessage::SBASMessageType) {
       if(!svfilter.check(1, nmm.sbm().gnsssv(), 0))
@@ -1204,6 +1313,8 @@ try
       if(res.empty())
         continue;
       etstamp();
+      cout<<"ublox debug message ";
+
       uint64_t maxt=0;
       for(const auto& sv : res) {
         if(sv.gnss != 2) continue;
@@ -1300,7 +1411,7 @@ try
         hexstring+=fmt::sprintf("%x", (int)getbitu((unsigned char*)id.c_str(), 4 + 4*n, 4));
 
       
-      cout<<" SAR RLM type "<< nmm.sr().type() <<" from gal sv ";
+      cout<<"SAR RLM type "<< nmm.sr().type() <<" from gal sv ";
       cout<< nmm.sr().gnsssv() << " beacon "<<hexstring <<" code "<<(int)nmm.sr().code()<<" params "<< makeHexDump(nmm.sr().params()) <<endl;
     }
     else if(nmm.type() == NavMonMessage::TimeOffsetType) {
