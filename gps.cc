@@ -5,6 +5,7 @@ std::basic_string<uint8_t> getCondensedGPSMessage(std::basic_string_view<uint8_t
 {
   uint8_t buffer[10*24/8];
 
+  // ingests 32 bit words, per word ignores first 2 bits, and then takes 24
   for(int w = 0 ; w < 10; ++w) {
     setbitu(buffer, 24*w, 24, getbitu(&payload[0], 2 + w*32, 24));
   }
@@ -96,8 +97,12 @@ int GPSState::parseGPSMessage(std::basic_string_view<uint8_t> cond, uint8_t* pag
 
       t0t = getbitu(&cond[0], 7*24 + 8, 8) * 4096; // WE SCALE THIS FOR THE USER!
       wn0t = getbitu(&cond[0], 7*24  + 16, 8);
+      
       dtLS = getbits(&cond[0], 8*24, 8);
+      wnLSF= getbitu(&cond[0], 8*24 + 8, 8);
+      dn = getbitu(&cond[0], 8*24 + 16, 8);
       dtLSF = getbits(&cond[0], 9*24, 8);
+
       
       //      cerr<<": a0: "<<a0<<", a1: "<<a1<<", t0t: "<< t0t * (1<<12) <<", wn0t: "<< wn0t<<", rough offset: "<<ldexp(a0, -30)<<endl;
       //      cerr<<"deltaTLS: "<< (int)dtLS<<", post "<< (int)dtLSF<<endl;

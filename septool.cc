@@ -2,6 +2,7 @@
 #include "navmon.hh"
 #include <iostream>
 #include <string.h>
+#include <signal.h>
 #include <time.h>
 #include "bits.hh"
 #include <sys/time.h>
@@ -12,7 +13,10 @@
 #include "swrappers.hh"
 #include "sclasses.hh"
 #include "version.hh"
-
+#include "fmt/format.h"
+#include "fmt/os.h"
+#include "fmt/printf.h"
+#include "gps.hh"
 using namespace std;
 
 
@@ -133,9 +137,16 @@ try
   bool doVERSION{false}, doSTDOUT{false};
   CLI::App app(program);
   string sourceaddr;
+  bool quiet{false};
+  string serial, owner, remark;
   app.add_option("--source", sourceaddr, "Connect to this IP address:port to source SBF (otherwise stdin)");
   app.add_option("--destination,-d", destinations, "Send output to this IPv4/v6 address");
   app.add_option("--station", g_srcid, "Station id")->required();
+  app.add_option("--serial", serial, "Serial number of your Septentrio device");
+  app.add_option("--quiet", quiet, "Don't emit noise");
+  app.add_option("--owner,-o", owner, "Name/handle/nick of owner/operator");
+  app.add_option("--remark", remark, "Remark for this station");
+
   app.add_flag("--version", doVERSION, "show program version and copyright");
   app.add_flag("--stdout", doSTDOUT, "Emit output to stdout");
   try {
@@ -181,7 +192,6 @@ try
   for(;;) {
     double to=1000;
     auto res = getSEPMessage(srcfd, &to);
-    cerr<<res.first.getID()<<" - " <<res.first.getIDBare() << endl;
     if(res.first.getID() == 4023) { // I/NAV
       auto str = res.first.getPayload();
       struct SEPInav
@@ -199,12 +209,14 @@ try
       SEPInav si;
       memcpy(&si, str.c_str(), sizeof(si));
       //      cerr<<"tow "<<si.towMsec /1000<<" wn "<<si.wn <<" sv " << (int) si.sv - 70<<" ";
+      int sigid = si.src & 31;
+      int pbsigid=sepsig2ubx(sigid);
       
       if(!si.crcPassed) {
-        cerr<<"I/NAV CRC error, skipping"<<endl;
+        cerr<<fmt::sprintf("E%02d (sigid %d) I/NAV CRC error, skipping\n", si.sv-70, pbsigid);
         continue;
       }
-      int sigid = si.src & 31;
+
 
       std::string inav((char*)si.navBits, 32);
       //      cerr<<makeHexDump(inav)<<endl;
@@ -220,45 +232,165 @@ try
         payload.append(1, si.navBits[4 * i + 0]);
       }
 
+      /*
+NAVBits contains the 234 bits of an I/NAV navigation page (in nominal
+or alert mode). Note that the I/NAV page is transmitted as two sub-pages
+(the so-called even and odd pages) of duration 1 second each (120 bits
+each). In this block, the even and odd pages are concatenated, even page
+ﬁrst and odd page last. The 6 tails bits at the end of the even page are
+removed (hence a total of 234 bits). If the even and odd pages have been
+received from two different carriers (E5b and L1), bit 5 of the Source
+ﬁeld is set.
+Encoding: NAVBits contains all the bits of the frame, with the ex-
+ception of the synchronization ﬁeld. The ﬁrst received bit is stored as the
+MSB of NAVBits[0]. The unused bits in NAVBits[7] must be ignored
+by the decoding software.
+      */
+
+      /* so we find EVEN_PAGE ODD_PAGE */
       
       basic_string<uint8_t> inav2;
-      // copy in the even page
+      // copy in the payload bits of the even page
       for(int n = 0 ; n < 14; ++n)
         inav2.append(1, getbitu(payload.c_str(), 2 + n*8, 8));
-      // odd page
+      // odd page payload bits
       for(int n = 0 ; n < 2; ++n)
         inav2.append(1, getbitu(payload.c_str(), 116 + n*8, 8));
       //      cerr<<makeHexDump(inav2) << endl;
 
+      
+      basic_string<uint8_t> reserved1;
+      for(int n=0; n < 5 ; ++n)
+	reserved1.append(1, getbitu(payload.c_str(), 116 + 16 + n*8, 8));
 
+      basic_string<uint8_t> crc;
+      for(int n=0; n < 3 ; ++n)
+	crc.append(1, getbitu(payload.c_str(), 116 + 16 + 40 +22 + 2 + n*8, 8));
+
+      
+      uint8_t ssp = getbitu(payload.c_str(), 116 + 16 + 40 + 22 + 2 + 24, 8);
+      
+      // xxx add reserved2
+      // xxx add sar
+      // xxx add spare
+      
       NavMonMessage nmm;
+
       double t = utcFromGST(si.wn - 1024, si.towMsec / 1000.0);
       //      cerr<<t<< " " <<si.wn - 1024 <<" " <<si.towMsec /1000.0 <<" " << g_dtLS<<endl;
       nmm.set_sourceid(g_srcid);
       nmm.set_type(NavMonMessage::GalileoInavType);
 
       nmm.set_localutcseconds(t);
-      nmm.set_localutcnanoseconds(0); // yeah XXX
+      nmm.set_localutcnanoseconds((t - floor(t))*1000000000); 
             
       nmm.mutable_gi()->set_gnsswn(si.wn - 1024);
-      
-      nmm.mutable_gi()->set_gnsstow(si.towMsec/1000.0);
+      // -2 since Septentrio counts from the *end* of the message      
+      nmm.mutable_gi()->set_gnsstow(si.towMsec/1000.0 - 2);
       nmm.mutable_gi()->set_gnssid(2);
       nmm.mutable_gi()->set_gnsssv(si.sv - 70);
       nmm.mutable_gi()->set_contents((const char*)&inav2[0], inav2.size());
-      nmm.mutable_gi()->set_sigid(sepsig2ubx(sigid));
+      nmm.mutable_gi()->set_sigid(pbsigid);
+      nmm.mutable_gi()->set_reserved1((const char*)&reserved1[0], reserved1.size());
+      if(pbsigid==1) // on E5b there is no SSP
+        nmm.mutable_gi()->set_ssp(ssp);
+      
+      nmm.mutable_gi()->set_crc((const char*)&crc[0], crc.size());
+      
       ns.emitNMM( nmm);
       
     }
-    else if(res.first.getID() == 5914) {
-      // current time
-    }
+    else if(res.first.getID() == 5914) {       // current time
+      auto str = res.first.getPayload();
+      struct TimeMsg {
+        uint32_t tow;
+        uint16_t wn;
+        int8_t utcyear;
+        int8_t utcmonth; // 1 = jan
+        int8_t utcday;
+        int8_t utchour;
+        int8_t utcmin;
+        int8_t utcsec;
+        int8_t deltals;
+        uint8_t synclevel;
+      } __attribute__((packed));
+      TimeMsg tmsg;
+      memcpy(&tmsg, str.c_str(), sizeof(tmsg));
+      if(!quiet)
+        cerr<< fmt::sprintf("UTC Time: %04d%02d%02d %02d:%02d:%02d\n",
+                          2000+tmsg.utcyear,
+                          tmsg.utcmonth,
+                          tmsg.utcday,
+                          tmsg.utchour,
+                          tmsg.utcmin,
+                          tmsg.utcsec);
 
+    }
     else if(res.first.getID() == 4026) {
       // GLONASS
     }
     else if(res.first.getID() == 4017) { // GPS-CA
+      auto str = res.first.getPayload();
+      struct GPSCA
+      {
+        uint32_t towMsec;
+        uint16_t wn;
+        uint8_t sv;
+        uint8_t crcPassed;
+        uint8_t viterbiCount;
+        uint8_t src;
+        uint8_t ign1;
+        uint8_t rxChannel;
+        uint8_t navBits[40];
+      } __attribute__((packed));
+      GPSCA ga;
+      memcpy(&ga, str.c_str(), sizeof(ga));
+      int sigid = ga.src & 31;
+      //      cerr<<"tow "<<sf.towMsec /1000<<" wn "<<sf.wn <<" sv " << (int) sf.sv - 70<<" sigid " << sigid <<" ";
+      if(!ga.crcPassed) {
+        cerr<<fmt::sprintf("G%02d CA CRC error, skipping\n", ga.sv);
+        continue;
+      }
 
+      // we get 10 words of 32 bits.
+      // bits 0-5 are 6 parity bits
+      // bits 6-29 are contents
+      // bits 30-31 are padding
+      // we need to output to protobuf the parity AND padding bits as well
+      // downstream they get stripped
+
+      unsigned char tmp[40]={};
+      for(int i = 0; i < 10; ++i) {
+        uint32_t rev= htonl(*(uint32_t*)&ga.navBits[4*i]);
+        setbitu(tmp, i*32, 30, getbitu((uint8_t*)&rev, 0, 30));
+      }
+
+      std::basic_string<uint8_t> payload(tmp, 40);
+      
+      auto cond = getCondensedGPSMessage(payload);
+      //      cerr<<makeHexDump(cond)<<"   ";
+      GPSState gs;
+      gs.parseGPSMessage(cond);
+      
+      NavMonMessage nmm;
+
+      double t = utcFromGST(ga.wn - 1024, ga.towMsec / 1000.0);
+      //      cerr<<t<< " " <<si.wn - 1024 <<" " <<si.towMsec /1000.0 <<" " << g_dtLS<<endl;
+      nmm.set_sourceid(g_srcid);
+      nmm.set_type(NavMonMessage::GPSInavType);
+
+      nmm.set_localutcseconds(t);
+      nmm.set_localutcnanoseconds((t - floor(t))*1000000000); 
+            
+      nmm.mutable_gpsi()->set_gnsswn(ga.wn);
+      int pbsigid=sepsig2ubx(sigid);
+      nmm.mutable_gpsi()->set_sigid(pbsigid);
+      
+      nmm.mutable_gpsi()->set_gnsstow(ga.towMsec/1000 - 6); // needs to be adjusted to beginning of message
+      nmm.mutable_gpsi()->set_gnssid(0);
+      nmm.mutable_gpsi()->set_gnsssv(ga.sv);
+      nmm.mutable_gpsi()->set_contents(string((char*)payload.c_str(), payload.size()));
+      ns.emitNMM( nmm);
     }
     else if(res.first.getID() == 4018) { // GPS-L2C
 
@@ -288,7 +420,7 @@ try
       int sigid = sf.src & 31;
       //      cerr<<"tow "<<sf.towMsec /1000<<" wn "<<sf.wn <<" sv " << (int) sf.sv - 70<<" sigid " << sigid <<" ";
       if(!sf.crcPassed) {
-        cerr<<"F/NAV CRC error, skipping"<<endl;
+        cerr<<fmt::sprintf("E%02d F/NAV CRC error, skipping\n", sf.sv-70);
         continue;
       }
 
@@ -334,6 +466,23 @@ try
         double x, y, z;
         float undulation;
         float vx, vy, vz;
+        float cog;
+        double rxclkbias;
+        float rxclkdrift;
+        uint8_t timesystem;
+        uint8_t datum;
+        uint8_t nrsv;
+        uint8_t wacorrinfo;
+        uint16_t referenceid;
+        uint16_t meancorrage;
+        uint32_t signalinfo;
+        uint8_t alertflag;
+        uint8_t nrbases;
+        uint16_t pppinfo;
+        uint16_t latency;
+        uint16_t haccuracy;
+        uint16_t vaccuracy;
+        uint8_t misc;
       } __attribute__((packed));
       PVTCartesian pc;
       memcpy(&pc, str.c_str(), sizeof(pc));
@@ -347,7 +496,8 @@ try
       nmm.mutable_op()->set_x(pc.x);
       nmm.mutable_op()->set_y(pc.y);
       nmm.mutable_op()->set_z(pc.z);
-      nmm.mutable_op()->set_acc(3.14);
+      //      cerr << "acc: "<<pc.haccuracy*0.01 <<" "<<pc.vaccuracy*0.01<<" nrsv "<<(int)pc.nrsv<<endl;
+      nmm.mutable_op()->set_acc( sqrt(pc.haccuracy*0.005*pc.haccuracy*0.005 + pc.vaccuracy*0.005*pc.vaccuracy*0.005)); // septentrio reports twice the error
       
       ns.emitNMM( nmm);
 
@@ -361,15 +511,16 @@ try
         nmm.mutable_od()->set_vendor("Septentrio");
         nmm.mutable_od()->set_hwversion("Mosaic");
         nmm.mutable_od()->set_swversion("");
-        nmm.mutable_od()->set_serialno("3060601");
+        nmm.mutable_od()->set_serialno(serial);
         nmm.mutable_od()->set_modules("");
         nmm.mutable_od()->set_clockoffsetns(0);
         nmm.mutable_od()->set_clockoffsetdriftns(0);
         nmm.mutable_od()->set_clockaccuracyns(0);
         nmm.mutable_od()->set_freqaccuracyps(0);
 
-        nmm.mutable_od()->set_owner("Septentrio");
-        nmm.mutable_od()->set_remark("");
+        
+        nmm.mutable_od()->set_owner(owner);
+        nmm.mutable_od()->set_remark(remark);
         nmm.mutable_od()->set_recvgithash(g_gitHash);
         nmm.mutable_od()->set_uptime(time(0) - starttime);
         ns.emitNMM( nmm);
@@ -387,30 +538,46 @@ try
         uint8_t src;
         uint8_t ign1;
         uint8_t rxChannel;
-        uint8_t navBits[48];
+        uint8_t navBits[64];
       } __attribute__((packed));
 
       SEPCnav sc;
+      
       auto str = res.first.getPayload();
       memcpy(&sc, str.c_str(), sizeof(sc));
       int sigid = sc.src & 31;
       //      cerr<<"C/NAV tow "<<sc.towMsec /1000<<" wn "<<sc.wn <<" sv " << (int) sc.sv - 70<<" sigid " << sigid <<" ";
       if(!sc.crcPassed) {
-        cerr<<"C/NAV CRC error, skipping"<<endl;
+        cerr<<fmt::sprintf("E%02d C/NAV CRC error, skipping\n", sc.sv-70);
         continue;
       }
 
-      std::string cnav((char*)sc.navBits, 48);
+      std::string cnav((char*)sc.navBits, 64);
       // byte order adjustment
-      std::basic_string<uint8_t> payload;
+      std::basic_string<uint8_t> payload;    
       
-      for(unsigned int i = 0 ; i < 12; ++i) {
+      for(unsigned int i = 0 ; i < 16; ++i) {
         payload.append(1, sc.navBits[4 * i + 3]);
         payload.append(1, sc.navBits[4 * i + 2]);
         payload.append(1, sc.navBits[4 * i + 1]);
         payload.append(1, sc.navBits[4 * i + 0]);
       }
 
+      unsigned char crc_buff[58]={0};
+      unsigned int i;
+      for (i=0; i< 462;i++)
+	setbitu(crc_buff, 2+i, 1,getbitu(payload.c_str(),i, 1));
+
+      int calccrc=rtk_crc24q(crc_buff,58);
+      int realcrc= getbitu(payload.c_str(), 14+448, 24);
+      if (calccrc !=  realcrc) {
+	cerr << "CRC mismatch, " << calccrc << " != " << realcrc <<endl;
+      }
+      //      else
+      //	cerr<<"Checksum Correct: "<<calccrc << " = " << realcrc<<endl;
+
+      
+      
       NavMonMessage nmm;
       double t = utcFromGST(sc.wn - 1024, sc.towMsec / 1000.0);
       //      cerr<<t<< " " <<si.wn - 1024 <<" " <<si.towMsec /1000.0 <<" " << g_dtLS<<endl;
@@ -550,6 +717,7 @@ try
       
     }
     else {
+    if(!quiet)
       cerr<<"Unknown message "<<res.first.getID() << " / " <<res.first.getIDBare()<<"  ("<<res.first.d_store.size()<<" bytes)"<<endl;
     }
   }
