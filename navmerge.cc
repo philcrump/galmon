@@ -48,10 +48,11 @@ static char program[]="navmerge";
 
 multimap<pair<uint64_t, uint64_t>, string> g_buffer;
 std::mutex g_mut;
+set<int> g_bsset;
 
 // navmerge can also dedup its output, we keep track of recent messages here
 // this means each Galileo message will only get set once
-map<tuple<uint32_t, std::string, uint32_t, std::string>, time_t> g_seen;
+map<tuple<uint32_t, std::string, uint32_t, std::string, int16_t>, time_t> g_seen;
 
 bool g_inavdedup{false};
 
@@ -72,14 +73,14 @@ bool g_inavdedup{false};
 
 */
 
-auto xSecondsFromNow(double seconds)
+static auto xSecondsFromNow(double seconds)
 {
   auto now = chrono::steady_clock::now();
   now += std::chrono::milliseconds((unsigned int)(seconds*1000));
   return now;
 }
 
-int msecLeft(const std::chrono::steady_clock::time_point& deadline)
+static int msecLeft(const std::chrono::steady_clock::time_point& deadline)
 {
   auto now = chrono::steady_clock::now();
   return std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now).count();
@@ -128,7 +129,7 @@ void recvSession(ComboAddress upstream)
       cerr<<" done"<<endl;
 
       for(int count=0;;++count) {
-        auto deadline = xSecondsFromNow(120); // 
+        auto deadline = xSecondsFromNow(600); // 
         string part=SReadWithDeadline(sock, 4, deadline);
         if(part.empty()) {
           cerr<<"EOF from "<<upstream.toStringWithPort()<<endl;
@@ -160,10 +161,13 @@ void recvSession(ComboAddress upstream)
         NavMonMessage nmm;
         nmm.ParseFromString(part);
 
+	if(g_bsset.count(nmm.sourceid()))
+	   continue;
+	
         if(g_inavdedup) {
           if(nmm.type() == NavMonMessage::GalileoInavType) {
             std::lock_guard<std::mutex> mut(g_mut);
-            decltype(g_seen)::key_type tup(nmm.gi().gnsssv(), nmm.gi().contents(), nmm.gi().sigid(), nmm.gi().reserved1());
+            decltype(g_seen)::key_type tup(nmm.gi().gnsssv(), nmm.gi().contents(), nmm.gi().sigid(), nmm.gi().reserved1(),nmm.gi().has_ssp() ? nmm.gi().ssp() : -1);
             
             if(!g_seen.count(tup))
               g_buffer.insert({{nmm.localutcseconds(), nmm.localutcnanoseconds()}, part});
@@ -202,11 +206,13 @@ int main(int argc, char** argv)
   vector<string> destinations;
   vector<string> sources;
   vector<string> listeners;
+  vector<int> badstations;
 
   bool doVERSION{false}, doSTDOUT{false};
   CLI::App app(program);
   app.add_option("--source", sources, "Connect to these IP address:port to source protobuf");
   app.add_option("--destination,-d", destinations, "Send output to this IPv4/v6 address");
+  app.add_option("--drop-stations", badstations, "Drop these station numbers");
   app.add_option("--listener,-l", listeners, "Make data available on this IPv4/v6 address");
   app.add_flag("--inavdedup", g_inavdedup, "Only pass on Galileo I/NAV, and dedeup");  
   app.add_flag("--version", doVERSION, "show program version and copyright");
@@ -245,7 +251,10 @@ int main(int argc, char** argv)
   if(doSTDOUT)
     ns.addDestination(1);
 
-  
+  for(const auto& bs : badstations) {
+    g_bsset.insert(bs);
+    cerr<<"Dropping station "<<bs<<endl;
+  }
   for(const auto& s : sources) {
     ComboAddress oneaddr(s, 29601);
     std::thread one(recvSession, oneaddr);
